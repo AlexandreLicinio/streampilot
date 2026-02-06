@@ -1,4 +1,4 @@
-# StreamPilot - Stream smarter. Pilot with precision. Broadcast better.
+# StreamPilot — Stream smarter. Pilot with precision. Broadcast better.
 
 <p align="center">
   <img src="StreamPilot.png" alt="StreamPilot logo" width="300"/>
@@ -10,36 +10,36 @@
   </a>
 </p>
 
-**StreamPilot** est une application web de supervision et de visualisation géolocalisée en temps réel des transmetteurs **Haivision**. Les stats des modems 4G/5G, ETH1-2, WIFI et USB sont enregistrés et visibles en temps réels pendant chaque session live via plusieurs graphiques. Cet outil peut être utilisé en live ou en repérage afin de cartographier une zone de couverture précise en 4G/5G privée/publique ou n'importe quelle interface réseau (ETH1-2, STARLINK, WIFI, USB) supportée par le transmetteur. 
-Idéal pour le broadcast en mobilité : Tour cycliste, marathons, triathlons, production distante et déploiement 5G privative.
+**StreamPilot** is a web app for real‑time supervision and geo‑visualization (location) of **Haivision** transmitters. Stats from 4G/5G modems, ETH1‑2, Wi‑Fi and USB are recorded and displayed live during each session through several charts. You can use it during live production or site surveys to map precise coverage for public/private 4G/5G or any network interface (ETH1‑2, STARLINK, Wi‑Fi, USB) supported by the transmitter.
+Ideal for mobile broadcast: cycle tours, marathons, triathlons, remote production, and private 5G deployments.
 
-Les données brutes sont fournies par le **Haivision Streamhub** qui collecte et distribue via une API REST (HTTP/HTTPS). Toutes les interfaces réseaux et le GPS sont monitorés.
-Les séries AIRxxx et PROxxx sont celles disposant d'un capteur GPS.
+Raw data is provided by **Haivision StreamHub** via its REST API (HTTP/HTTPS). All network interfaces and GPS are monitored.
+AIRxxx and PROxxx series are the ones with GPS sensors.
 
-### Le futur de Streampilot ?
+### What’s next for StreamPilot?
 
-À ce jour, il n'est pas possible d'obtenir via l'API REST du StreamHub toutes les informations techniques de chaque modem (Bande, Nom de l'opérateur, SNR, RSSI et priorité). Mon but est que **StreamPilot** puisse piloter chaque modem afin de commuter en live le ou les meilleurs interfaces réseaux. Cela permettrait de garantir une qualité de transmission supérieure en rendant automatique la gestion de priorité des interfaces. 
+Today, StreamHub’s REST API doesn’t expose every modem details (Band, Operator name, SNR, RSSI, priority). The goal is for **StreamPilot** to actively **pilot each modem**, switching live to the best interface(s). This would raise transmission quality by automatically managing interface priorities.
 
 ---
 
-### Roadmap:
+### Roadmap
 
 - [x] Haivision SST transmitters
-- [ ] Notifications slack
-- [ ] Pilotage des priorités et des modems (besoin de plus de contrôle via l'API)
+- [ ] Slack notifications
+- [ ] Modem and priority control (requires deeper API access from Haivision)
 
 ---
 
-## Pré-requis:
+## Prerequisites
 
-Debian13
-Python 3.13 au moins
+- Debian 13
+- Python ≥ 3.13
 
-## Installation:
+## Installation
 
-Il n'est pas nécessaire d'être en **root**. Ni pour l'installation, ni pour le lancement de Streampilot.
+You **don’t** need to be **root** to install or run StreamPilot.
 
-1. Téléchargez le projet puis dans le dossier, créez un environnement virtuel Python :
+1. Download the project and create a Python virtual environment in the folder:
 
 ```bash
 https://github.com/AlexandreLicinio/streampilot.git
@@ -47,119 +47,119 @@ cd streampilot
 python3 -m venv --system-site-packages .
 ```
 
-2. Installez les dépendances principales :
+2. Install the main dependencies:
 
 ```bash
 bin/python -m pip install CherryPy Mako requests
 ```
+
 ---
 
-## Lancement du serveur:
+## Run the server
 
-Au premier lancement, tous les fichiers ainsi que la db seront automatiquement construits.
-Définissez le port d’écoute (exemple : 5555) et démarrez le serveur depuis la racine du projet:
+On the first run, all files and the database will be created automatically.
+Set the listening port (example: 5555) and start the server from the project root:
 
 ```bash
 StreamPilot=5555 CLIENT_NAME="John Dear" MAX_STREAMHUB=4 bin/python -m server.main.server
 ```
 
-> Variables d'environnements
+> **Environment variables**
+>
+> - `StreamPilot`: UI TCP port (default: 5555)
+> - `CLIENT_NAME`: Generic name displayed in the UI
+> - `MAX_STREAMHUB`: Maximum number of StreamHubs polled by the app (default: 4)
 
-- `StreamPilot` : Port TCP de l'UI (par défaut: 5555).
-- `CLIENT_NAME` : Nom générique dans l'UI.
-- `MAX_STREAMHUB` : Nombre maximum de Streamhub pollés par l'application (par défaut: 4)
-
-L’application sera accessible sur [http://localhost:5555](http://localhost:5555).
-
----
-
-## Utilisation:
-
-<p align="center">
-  <img src="streamhub_login_page.png" alt="streamhub login page" width="700"/>
-</p>
-
-Dans le menu à droite du StreamHub, allez dans **REST API doc**.
-
-<p align="center">
-  <img src="streamhub_api_page.png" alt="streamhub api page" width="700"/>
-</p>
-
-Copiez la clef **api_key**.
-
-Dans Streampilot [http://localhost:5555](http://localhost:5555), allez dans le menu **Devices** et ajouter un StreamHub en remplissant les champs. Une fois ajouté, l'équipement est pollé tant que Streampilot est actif.
-
-<p align="center">
-  <img src="dashboard.png" alt="streampilot Dashboard" width="700"/>
-</p>
-
-Dès qu'un transmetteur est en ligne et que les données GPS sont accessibles via l'api, sa position est indiquée sur le carte du Dashboard. 
-
-<p align="center">
-  <img src="in_live_dashboard.png" alt="rack200 in live mode" width="700"/>
-</p>
-
-Si le transmetteur passe en **live** une session est automatiquement créée. 
-
-<p align="center">
-  <img src="session_live.png" alt="logs dashboard" width="700"/>
-</p>
-
-Les sessions sont accessibles via le menu **Logs**. En cliquant sur le bouton **View** de la session en cours vous pouvez visualiser en temps-réel la position GPS et l'état des interfaces réseaux du transmetteur SST.
-
-
-<p align="center">
-  <img src="gps_session_example.png" alt="streamhub api page" width="700"/>
-</p>
-
-Tant que le transmetteur est en **live**, les graphiques et la timeline vont progresser. En décochant **Follow live** vous pouvez bouger la timeline afin de visualiser un moment précis (GPS + INTERAFACES). 
+The app will be available at [http://localhost:5555](http://localhost:5555).
 
 ---
 
-## Fonctionnalités:
+## Usage
 
-- **Supervision** des transmetteurs Haivision StreamHub via le protocole SST. 
-- **Géolocalisation en temps réel** des inputs SST sur une carte interactive.  
-- **Timeline de session** avec métriques : bitrate, OWD, pertes, dropped packets.  
-- **Export JSON/CSV** des sessions avec toutes les mesures (GPS, liens, drops…).  
-- **Import JSON** des sessions avec toutes les mesures (GPS, liens, drops…).
-- **Export GeoJSON** pour analyses externes (QGIS, Kepler.gl, geojson.io…).  
-- **Sessions GPS** avec suppression individuelle ou purge totale.  
-- **Vue Health (/health)** avec état du poller, sessions actives, âge des derniers samples par streamhub.  
-- **Sparklines** (mini courbes SVG sur 1–2 minutes) de l’âge du dernier sample.  
-- **Endpoint JSON (/health_json)** pour monitoring externe.  
-- **Endpoint Prometheus (/metrics)** pour intégration Grafana/Prometheus.  
-- **Follow live** pour voir l’actualisation en direct des sessions.  
-- **Background poller** indépendant de l’UI, qui capture les sessions même si le Dashboard n’est pas ouvert.  
-- **Thème clair/sombre** via toggle.  
-- **Dashboard responsive** (Bootstrap 5).  
+<p align="center">
+  <img src="streamhub_login_page.png" alt="StreamHub login page" width="700"/>
+</p>
+
+In the StreamHub side menu, go to **REST API doc**.
+
+<p align="center">
+  <img src="streamhub_api_page.png" alt="StreamHub API page" width="700"/>
+</p>
+
+Copy the **api_key**.
+
+In StreamPilot [http://localhost:5555](http://localhost:5555), open **Devices** and add a StreamHub by filling in the fields. Once added, the device is polled as long as StreamPilot is running.
+
+<p align="center">
+  <img src="dashboard.png" alt="StreamPilot Dashboard" width="700"/>
+</p>
+
+As soon as a transmitter is online and GPS data is available via the API, its position appears on the Dashboard map.
+
+<p align="center">
+  <img src="in_live_dashboard.png" alt="RACK200 in live mode" width="700"/>
+</p>
+
+When the transmitter goes **live**, a session is created automatically.
+
+<p align="center">
+  <img src="session_live.png" alt="Logs dashboard" width="700"/>
+</p>
+
+Sessions are accessible from the **Logs** menu. Click **View** on the running session to see real‑time GPS and network interfaces status for the SST transmitter.
+
+<p align="center">
+  <img src="gps_session_example.png" alt="GPS session example" width="700"/>
+</p>
+
+While the transmitter is **live**, charts and timeline progress continuously. If you uncheck **Follow live**, you can move the timeline to inspect a specific moment (GPS + INTERFACES).
 
 ---
 
-## Monitoring et intégrations:
+## Features
 
-- **/health** : état du poller, sessions, âge des samples.
-- **/health_json** : monitoring externe (JSON).
-- **/metrics** : endpoint Prometheus pour Grafana/Prometheus.
-
----
-
-## Branding:
-
-- Produit : **StreamPilot**  
-- Tagline : *Stream smarter. Pilot with precision. Broadcast better.*  
-- Copyright : StreamPilot — Copyright (C) 2026 Alexandre Licinio
-- Author : Alexandre Licinio
-
----
-
-## Contribution:
-
-Toute personne ou entreprise souhaitant contribuer est la bienvenue. Si vous décidez de vous impliquer, n'hésitez pas à me contacter.
+- **Supervision** of Haivision StreamHub transmitters over the SST protocol
+- **Real‑time geolocation** of SST inputs on an interactive map
+- **Session timeline** with metrics: bitrate, OWD, losses, dropped packets
+- **JSON/CSV export** of sessions with all measurements (GPS, links, drops…)
+- **JSON import** of sessions with full measurements (GPS, links, drops…)
+- **GeoJSON export** for external analysis (QGIS, Kepler.gl, geojson.io…)
+- **GPS sessions** with individual deletion or full purge
+- **Health view** (`/health`) with poller state, active sessions, last sample age per StreamHub
+- **Sparklines** (mini SVG charts over 1–2 minutes) for last‑sample age
+- **JSON endpoint** (`/health_json`) for external monitoring
+- **Prometheus endpoint** (`/metrics`) for Grafana/Prometheus
+- **Follow live** to keep the session view synced in real time
+- **Background poller** independent from the UI (captures sessions even if the Dashboard isn’t open)
+- **Light/Dark theme** toggle
+- **Responsive dashboard** (Bootstrap 5)
 
 ---
 
-## Licence:
+## Monitoring & integrations
+
+- **/health**: poller state, sessions, sample ages
+- **/health_json**: external monitoring (JSON)
+- **/metrics**: Prometheus endpoint for Grafana/Prometheus
+
+---
+
+## Branding
+
+- Product: **StreamPilot**  
+- Tagline: *Stream smarter. Pilot with precision. Broadcast better.*  
+- Copyright: StreamPilot — Copyright (C) 2026 Alexandre Licinio  
+- Author: Alexandre Licinio
+
+---
+
+## Contributing
+
+Individuals and companies are welcome to contribute. If you’d like to get involved, feel free to reach out.
+
+---
+
+## License
 
 StreamPilot — Copyright (C) 2026 Alexandre Licinio
 
