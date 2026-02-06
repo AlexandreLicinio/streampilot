@@ -42,6 +42,8 @@ Il n'est pas nécessaire d'être en **root**. Ni pour l'installation, ni pour le
 1. Téléchargez le projet puis dans le dossier, créez un environnement virtuel Python :
 
 ```bash
+https://github.com/AlexandreLicinio/streampilot.git
+cd streampilot
 python3 -m venv --system-site-packages .
 ```
 
