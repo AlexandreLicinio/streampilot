@@ -82,7 +82,7 @@ L’application sera accessible sur [http://localhost:5555](http://localhost:555
 Dans le menu à droite du StreamHub, allez dans **REST API doc**.
 
 <p align="center">
-  <img src="streamhub_api_page.png" alt="streamhub api page" width="300"/>
+  <img src="streamhub_api_page.png" alt="streamhub api page" width="700"/>
 </p>
 
 Copiez la clef **api_key**.
@@ -90,26 +90,26 @@ Copiez la clef **api_key**.
 Dans Streampilot [http://localhost:5555](http://localhost:5555), allez dans le menu **Devices** et ajouter un StreamHub en remplissant les champs. Une fois ajouté, l'équipement est pollé tant que Streampilot est actif.
 
 <p align="center">
-  <img src="dashboard.png" alt="streampilot Dashboard" width="300"/>
+  <img src="dashboard.png" alt="streampilot Dashboard" width="700"/>
 </p>
 
 Dès qu'un transmetteur est en ligne et que les données GPS sont accessibles via l'api, sa position est indiquée sur le carte du Dashboard. 
 
 <p align="center">
-  <img src="in_live_dashboard.png" alt="rack200 in live mode" width="300"/>
+  <img src="in_live_dashboard.png" alt="rack200 in live mode" width="700"/>
 </p>
 
 Si le transmetteur passe en **live** une session est automatiquement créée. 
 
 <p align="center">
-  <img src="session_live.png" alt="logs dashboard" width="300"/>
+  <img src="session_live.png" alt="logs dashboard" width="700"/>
 </p>
 
 Les sessions sont accessibles via le menu **Logs**. En cliquant sur le bouton **View** de la session en cours vous pouvez visualiser en temps-réel la position GPS et l'état des interfaces réseaux du transmetteur SST.
 
 
 <p align="center">
-  <img src="gps_session_example.png" alt="streamhub api page" width="300"/>
+  <img src="gps_session_example.png" alt="streamhub api page" width="700"/>
 </p>
 
 Tant que le transmetteur est en **live**, les graphiques et la timeline vont progresser. En décochant **Follow live** vous pouvez bouger la timeline afin de visualiser un moment précis (GPS + INTERAFACES). 
