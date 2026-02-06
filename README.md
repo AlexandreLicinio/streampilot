@@ -76,7 +76,7 @@ L’application sera accessible sur [http://localhost:5555](http://localhost:555
 ## Utilisation:
 
 <p align="center">
-  <img src="streamhub_login_page.png" alt="streamhub login page" width="300"/>
+  <img src="streamhub_login_page.png" alt="streamhub login page" width="700"/>
 </p>
 
 Dans le menu à droite du StreamHub, allez dans **REST API doc**.
