@@ -1,0 +1,24 @@
+# Environnement virtuel Python
+bin/
+lib/
+include/
+pyvenv.cfg
+
+# DB locale
+mini.db
+
+# Config locale (non partagée)
+streampilot.yml
+
+# Cache Python
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS metadata
+.DS_Store
+
+# VSCode / IDE
+.vscode/
+.idea/
+

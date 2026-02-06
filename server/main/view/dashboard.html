@@ -1,0 +1,564 @@
+<!--
+SPDX-License-Identifier: LGPL-2.1-or-later
+Copyright (C) 2026 Alexandre Licinio
+-->
+<%inherit file="base.html"/>
+    <%block name="body">
+    <div class="d-flex justify-content-between align-items-center mb-3 w-100">
+    <h1 class="h3 m-0">Dashboard</h1>
+    <div>
+    <a class="btn btn-outline-secondary me-2" href="/logs_ui">Logs</a>
+    % if not devices:
+    <a class="btn btn-primary" href="/devices">Add StreamHub</a>
+    % else:
+    <a class="btn btn-outline-secondary" href="/devices" title="Manage StreamHub">Manage StreamHub</a>
+    % endif
+    </div>
+    </div>
+    
+    % if not devices:
+    <div class="alert alert-warning">No devices yet. Click "Add StreamHub".</div>
+    % else:
+    <div class="mt-2" id="hubTabsWrap">
+      <ul class="nav nav-tabs" role="tablist">
+      % for idx, d in enumerate(devices):
+        <li class="nav-item" role="presentation">
+          <a href="#pane-${d['id']}" class="nav-link ${'active' if idx==0 else ''}"
+             data-pane="pane-${d['id']}" role="tab" aria-selected="${'true' if idx==0 else 'false'}">
+            ${d['name'] or 'StreamHub'} <span class="small text-muted">(${d['host']}:${d['port']})</span>
+          </a>
+        </li>
+      % endfor
+      </ul>
+    </div>
+    <div class="row g-3 justify-content-start ms-0" id="cards" style="margin-left:0;">
+    % for idx, d in enumerate(devices):
+    <div class="col-12 device-pane ${'' if idx==0 else 'd-none'}" id="pane-${d['id']}">
+    <div class="row g-3 align-items-stretch">
+    <div class="col-12 col-lg-8 col-xl-7">
+    <div class="card card-status h-100" data-device-id="${d['id']}">
+    <div class="card-header d-flex justify-content-between align-items-center">
+    <strong>${d['name'] or 'StreamHub'} (${d['host']})</strong>
+    <div class="small text-muted" style="display: none;">Last update: <span id="ts-${d['id']}">—</span></div>
+    <span class="badge text-bg-secondary" id="status-${d['id']}">loading…</span>
+    </div>
+    <div class="card-body">
+    <div class="mt-2 mb-0" id="body-${d['id']}">—</div>
+    </div>
+    </div>
+    </div>
+    <div class="col-12 col-lg-4 col-xl-5">
+    <div class="h-100 p-2 border rounded d-flex flex-column">
+    <div class="d-flex justify-content-between align-items-center mb-2">
+    <div class="text-muted small">Video Transmitters map</div>
+    <div class="d-flex justify-content-between align-items-center mb-2">
+    </div>
+    </div>
+    <div id="devmap-${d['id']}" style="width:100%;min-height:220px;flex:1 1 auto;" class="border"></div>
+    </div>
+    </div>
+    </div>
+    </div>
+    % endfor
+    </div>
+    <!-- Leaflet (OpenStreetMap) assets -->
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    />
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+    <script>
+    (function(){
+      var tabs = document.querySelectorAll('#hubTabsWrap .nav-link');
+      function activate(id){
+        document.querySelectorAll('.device-pane').forEach(function(el){ el.classList.add('d-none'); });
+        var target = document.getElementById(id);
+        if (target) { target.classList.remove('d-none'); }
+        tabs.forEach(function(t){ t.classList.remove('active'); });
+        for (var i=0;i<tabs.length;i++){
+          if (tabs[i].getAttribute('data-pane')===id){ tabs[i].classList.add('active'); break; }
+        }
+     setTimeout(function(){
+  try{
+    const devId = id.replace('pane-','');
+    const s = window._devMaps && window._devMaps[devId];
+    if (s && s.map && s.map.invalidateSize) s.map.invalidateSize();
+  }catch(_){ }
+}, 50);
+      }
+      tabs.forEach(function(a){
+        a.addEventListener('click', function(ev){
+          ev.preventDefault();
+          activate(this.getAttribute('data-pane'));
+        });
+      });
+    })();
+    </script>
+    <script>
+    // Helpers UI
+    function badge(cls, text){ return '<span class="badge bg-'+cls+' me-1"><small>'+text+'</small></span>'; }
+    
+    
+    function safe(v){ return (v===null||v===undefined) ? '' : String(v); }
+    function idSafe(s){ return String(s==null?'':s).replace(/[^A-Za-z0-9_-]/g,'_'); }
+    
+    // Color palette for up to 16 concurrent inputs (stable per device/input)
+    window._inputColor = window._inputColor || {}; // { devId: { inputKey: '#RRGGBB' } }
+    const INPUT_COLOR_PALETTE = [
+    '#0082c8', // bleu
+    '#911eb4', // violet
+    '#46f0f0', // cyan
+    '#f032e6', // magenta
+    '#e6beff', // lavande
+    '#aa6e28', // brun
+    '#fffac8', // beige clair
+    '#800000', // bordeaux
+    '#000080', // bleu marine
+    '#ffd8b1', // sable
+    '#a9a9a9', // gris
+    '#ffd700', // or
+    '#20b2aa', // turquoise
+    '#ff69b4', // rose vif
+    '#708090', // gris ardoise
+    '#8a2be2'  // bleu-violet
+    ];
+    function getInputColor(devId, key){
+        if (!window._inputColor[devId]) window._inputColor[devId] = {};
+            const map = window._inputColor[devId];
+            if (map[key]) return map[key];
+                const idx = (parseInt(key,10) >= 0 ? parseInt(key,10) : (String(key).charCodeAt(0)||0)) % INPUT_COLOR_PALETTE.length;
+                const color = INPUT_COLOR_PALETTE[idx];
+                map[key] = color;
+                return color;
+                }
+                function badgeColored(text, hex){
+                    const fg = '#ffffff';
+                    return '<span class="badge me-1" style="background-color:'+hex+';color:'+fg+'"><small>'+text+'</small></span>';
+                }
+                
+                // Reusable GPS extractor helper
+                function getGpsFrom(obj){
+                    if (!obj) return null;
+                        // 0) allow top-level coords on the object
+                        const latTop = obj.latitude ?? obj.lat;
+                        const lngTop = obj.longitude ?? obj.lng ?? obj.lon ?? obj.long;
+                        if (latTop != null && lngTop != null){
+                            const lat0 = typeof latTop === 'string' ? parseFloat(latTop) : (typeof latTop === 'number' ? latTop : NaN);
+                            const lng0 = typeof lngTop === 'string' ? parseFloat(lngTop) : (typeof lngTop === 'number' ? lngTop : NaN);
+                            if (Number.isFinite(lat0) && Number.isFinite(lng0)) return {lat: lat0, lng: lng0};
+                                }
+                                // 1) common nested containers
+                                const candidates = ['gps','GPS','location','position','geo','coordinates','geolocation','coord','metadata','meta','state','extra'];
+                                for (const key of candidates){
+                                    const g = obj[key];
+                                    if (!g) continue;
+                                        // direct fields in this container
+                                        const latRaw = g.latitude ?? g.lat ?? g.Latitude ?? g.Lat ?? g.y;
+                                        const lngRaw = g.longitude ?? g.lng ?? g.Longitude ?? g.Lng ?? g.lon ?? g.long ?? g.x;
+                                        const lat = (typeof latRaw === 'string') ? parseFloat(latRaw) : (typeof latRaw === 'number' ? latRaw : NaN);
+                                        const lng = (typeof lngRaw === 'string') ? parseFloat(lngRaw) : (typeof lngRaw === 'number' ? lngRaw : NaN);
+                                        if (Number.isFinite(lat) && Number.isFinite(lng)) return {lat, lng};
+                                            // one-level deep scan on objects inside the container
+                                            if (typeof g === 'object'){
+                                                for (const [kk, vv] of Object.entries(g)){
+                                                    if (!vv || typeof vv !== 'object') continue;
+                                                        const lat2 = vv.latitude ?? vv.lat ?? vv.Latitude ?? vv.Lat ?? vv.y;
+                                                        const lng2 = vv.longitude ?? vv.lng ?? vv.Longitude ?? vv.Lng ?? vv.lon ?? vv.long ?? vv.x;
+                                                        const la = (typeof lat2 === 'string') ? parseFloat(lat2) : (typeof lat2 === 'number' ? lat2 : NaN);
+                                                        const ln = (typeof lng2 === 'string') ? parseFloat(lng2) : (typeof lng2 === 'number' ? lng2 : NaN);
+                                                        if (Number.isFinite(la) && Number.isFinite(ln)) return {lat: la, lng: ln};
+                                                            }
+                                                            }
+                                                            }
+                                                            // 2) last-known GPS objects
+                                                            const lastCandidates = ['last_gps','lastGps','last_position','lastPosition','last_location','lastLocation'];
+                                                            for (const key of lastCandidates){
+                                                                const g = obj[key];
+                                                                if (!g) continue;
+                                                                    const latRaw = g.latitude ?? g.lat;
+                                                                    const lngRaw = g.longitude ?? g.lng ?? g.lon ?? g.long;
+                                                                    const lat = (typeof latRaw === 'string') ? parseFloat(latRaw) : (typeof latRaw === 'number' ? latRaw : NaN);
+                                                                    const lng = (typeof lngRaw === 'string') ? parseFloat(lngRaw) : (typeof lngRaw === 'number' ? lngRaw : NaN);
+                                                                    if (Number.isFinite(lat) && Number.isFinite(lng)) return {lat, lng};
+                                                                        }
+                                                                        return null;
+                                                                        }
+                                                                        
+                                                                        // Extract dropped packets counts for video and mpegts-up (sum rx_lost_packets)
+                                                                        function getDroppedCounts(obj){
+                                                                            if (!obj) return null;
+                                                                                const containers = [obj.streamStats, obj.stream_stats, obj.stats];
+                                                                                let video = 0, ts = 0; // ts = mpegts-up
+                                                                                let seen = false;
+                                                                                for (const c of containers){
+                                                                                    if (!c || typeof c !== 'object') continue;
+                                                                                        // video
+                                                                                        if (Array.isArray(c.video)){
+                                                                                            for (const it of c.video){ if (it && Number.isFinite(+it.rx_lost_packets)) { video += +it.rx_lost_packets; seen = true; } }
+                                                                                                }
+                                                                                                // mpegts-up (property name may contain hyphen)
+                                                                                                const tsArr = c['mpegts-up'];
+                                                                                                if (Array.isArray(tsArr)){
+                                                                                                    for (const it of tsArr){ if (it && Number.isFinite(+it.rx_lost_packets)) { ts += +it.rx_lost_packets; seen = true; } }
+                                                                                                        }
+                                                                                                        }
+                                                                                                        return seen ? { video, ts } : null;
+                                                                                                        }
+                                                                                                        
+                                                                                                        
+                                                                                                        // Rend un payload StreamHub (semblable à ton ancien data_sql)
+                                                                                                        function renderStreamHubPayload(p){
+                                                                                                            // si le device renvoie de l'HTML (ex: page de login), on affiche tel quel
+                                                                                                            if (typeof p === 'string') {
+                                                                                                                return '<pre class="mb-0">'+p.replace(/[&<>]/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[s]))+'</pre>';
+                                                                                                            }
+                                                                                                                
+                                                                                                                const characteristics = p.characteristics || {};
+                                                                                                                const chars = characteristics; // compat avec le code plus bas
+                                                                                                                const cfg = p.configuration || {};
+                                                                                                                const devCfg = cfg.device || {};
+                                                                                                                
+                                                                                                                // --- identifier: préfère characteristics.identifier, fallback config.device.Identifier
+                                                                                                                const deviceId =
+                                                                                                                characteristics.identifier ||
+                                                                                                                characteristics.Identifier ||
+                                                                                                                devCfg.Identifier ||
+                                                                                                                devCfg.identifier || '';
+                                                                                                                
+                                                                                                                // --- inputs container
+                                                                                                                const inputs = p.inputs || {};
+                                                                                                                
+                                                                                                                // --- recompute counters (on/off/idle/error) en scannant les inputs numériques
+                                                                                                                
+                                                                                                                let html = '';
+                                                                                                                
+                                                                                                                // On retire les clés agrégées pour parcourir uniquement les entrées numériques
+                                                                                                                const filteredKeys = Object.keys(inputs).filter(k => /^\d+$/.test(k));
+                                                                                                                
+                                                                                                                // Liste des inputs
+                                                                                                                for (const key of filteredKeys){
+                                                                                                                    const idx = parseInt(key,10)+1;
+                                                                                                                    const v = inputs[key] || {};
+                                                                                                                    // Only show SST protocol inputs
+                                                                                                                    if (!v.protocol || v.protocol.toLowerCase() !== 'sst') continue;
+                                                                                                                        const L = (v.links && typeof v.links==='object') ? v.links : null;
+                                                                                                                        const status = (v.status||'').toLowerCase();  // 'on' | 'idle' | 'error' | ...
+                                                                                                                        if (status === 'off') continue;
+                                                                                                                            const statusCls = status==='on' ? 'success' : (status==='idle' ? 'info' : (status==='error' ? 'warning' : 'secondary'));
+                                                                                                                            
+                                                                                                                            // Three-columns layout: [Preview+Format] | [Info] | [Links]
+                                                                                                                            // Left: Preview + Format
+                                                                                                                            html += '<div class="row g-3 align-items-start pt-1 pb-4 border-top">';
+                                                                                                                            html += '<div class="col-md-4">';
+                                                                                                                            if (v.thumbnail) {
+                                                                                                                                html += '<div class="mb-2"><img class="img-thumbnail" style="max-width:100%" src="data:image/jpeg;base64,'+v.thumbnail+'"></div>';
+                                                                                                                            }
+                                                                                                                                (function(){
+                                                                                                                                 const fmt = (v.format!=null ? v.format
+                                                                                                                                              : (v.video_format!=null ? v.video_format
+                                                                                                                                                 : (v.encoding!=null ? v.encoding
+                                                                                                                                                    : (v.profile!=null ? v.profile
+                                                                                                                                                       : (v.info!=null ? v.info : null)))));
+                                                                                                                                 if (fmt!=null) html += '<div class="text-muted small">format: '+safe(String(fmt))+'</div>';
+                                                                                                                                 })();
+                                                                                                                                 html += '</div>';
+                                                                                                                                 
+                                                                                                                                 // Middle: Info badges (status/input, rx/data, GPS, Dropped, IFB)
+                                                                                                                                 html += '<div class="col-md-4">';
+                                                                                                                                 (function(){
+                                                                                                                                  const hex = getInputColor(idSafe(deviceId), key);
+                                                                                                                                  html += badgeColored('in-'+idx+(v.family_name ? ' ('+safe(v.family_name)+')' : '')+': '+safe(v.identifier||'input '+idx), hex);
+                                                                                                                                  })();
+                                                                                                                                  if (L && L.total_rx_bitrate_from_links!=null){
+                                                                                                                                      const rx = parseInt(L.total_rx_bitrate_from_links, 10) || 0;
+                                                                                                                                      let cls = 'secondary';
+                                                                                                                                      if (rx < 1500) cls = 'danger';
+                                                                                                                                      else if (rx < 3000) cls = 'warning';
+                                                                                                                                          else cls = 'success';
+                                                                                                                                          let label = rx + ' kb/s';
+                                                                                                                                          if (L.total_links!=null) label += ' ('+safe(L.total_links)+' links)';
+                                                                                                                                              if (v.data_consumed!=null || v.total_data!=null){
+                                                                                                                                                  const gb = v.data_consumed!=null ? (v.data_consumed/1024/1024/1024) : (v.total_data/1024/1024/1024);
+                                                                                                                                                  label += ' '+gb.toFixed(1)+' GB';
+                                                                                                                                              }
+                                                                                                                                                  html += ' '+badge(cls, label);
+                                                                                                                                                  }
+                                                                                                                                                  (function(){
+                                                                                                                                                   const gg = getGpsFrom(v);
+                                                                                                                                                   if (gg) {
+                                                                                                                                                   const glat = gg.lat.toFixed(6);
+                                                                                                                                                   const glng = gg.lng.toFixed(6);
+                                                                                                                                                   html += ' '+badge('success','lat '+glat)+' '+badge('success','lng '+glng);
+                                                                                                                                                   } else {
+                                                                                                                                                   html += ' '+badge('secondary','lat N/A')+' '+badge('secondary','lng N/A');
+                                                                                                                                                   }
+                                                                                                                                                   })();
+                                                                                                                                                   (function(){
+                                                                                                                                                    const d = getDroppedCounts(v);
+                                                                                                                                                    if (!d) return;
+                                                                                                                                                    const cls = (d.video>0 || d.ts>0) ? 'danger' : 'success';
+                                                                                                                                                    const label = 'Dropped: (Video: '+d.video+') (mpegts: '+d.ts+')';
+                                                                                                                                                    html += '<div class="mt-2">'+ badge(cls, label) +'</div>';
+                                                                                                                                                    })();
+                                                                                                                                                    (function(){
+                                                                                                                                                     const ifb = v.video_ifb || {};
+                                                                                                                                                     if (ifb.video_ifb_decoder){
+                                                                                                                                                     const ok = ifb.video_ifb_decoder === 'on';
+                                                                                                                                                     html += '<div class="mt-2">video return: '+badge(ok?'success':'danger', safe(ifb.video_ifb_decoding_source||'n/a'))+'</div>';
+                                                                                                                                                     }
+                                                                                                                                                     })();
+                                                                                                                                                     html += '</div>';
+                                                                                                                                                     
+                                                                                                                                                     // Right: Links info (moved here into its own column)
+                                                                                                                                                     html += '<div class="col-md-4 small">';
+                                                                                                                                                     
+                                                                                                                                                     if (v.links && typeof v.links === 'object'){
+                                                                                                                                                         const L = v.links;
+                                                                                                                                                         const linkKeys = Object.keys(L).filter(k => !['total_links','total_rx_bitrate_from_links','total_tx_bitrate_from_links'].includes(k));
+                                                                                                                                                         if (linkKeys.length){
+                                                                                                                                                             html += '<div class="mb-1">';
+                                                                                                                                                             for (const lk of linkKeys){
+                                                                                                                                                                 const it = L[lk] || {};
+                                                                                                                                                                 const rb = parseInt(it.rx_bitrate, 10) || 0;
+                                                                                                                                                                 let cls = 'secondary';
+                                                                                                                                                                 if (rb < 100) cls = 'info';
+                                                                                                                                                                 else if (rb > 100) cls = 'success';
+                                                                                                                                                                     else cls = 'success';
+                                                                                                                                                                     let label = (safe(it.name || lk)) + ': ' + rb + ' kb/s';
+                                                                                                                                                                     if (it.rtt != null) label += ' • ' + safe(it.rtt) + ' ms ';
+                                                                                                                                                                         if (it.owdR != null) label += ' • OWD ' + safe(it.owdR) + ' ms';
+                                                                                                                                                                             if (it.rx_percent_lost != null || it.rx_lost_nb_packets != null) {
+                                                                                                                                                                                 label += ' • loss ' + (it.rx_percent_lost != null ? safe(it.rx_percent_lost) + '%' : '?%');
+                                                                                                                                                                             }
+                                                                                                                                                                                 html += badge(cls, label);
+                                                                                                                                                                                 }
+                                                                                                                                                                                 html += '</div>';
+                                                                                                                                                                                 }
+                                                                                                                                                                                 }
+                                                                                                                                                                                 // video IFB
+                                                                                                                                                                                 const ifb = v.video_ifb || {};
+                                                                                                                                                                                 if (ifb.video_ifb_decoder){
+                                                                                                                                                                                     const ok = ifb.video_ifb_decoder === 'on';
+                                                                                                                                                                                         html += '<div class="mb-1">video return: '+badge(ok?'success':'danger', safe(ifb.video_ifb_decoding_source||'n/a'))+'</div>';
+                                                                                                                                                                                         }
+                                                                                                                                                                                         html += '</div>';
+                                                                                                                                                                                         html += '</div>'; // row
+                                                                                                                                                                                         }
+                                                                                                                                                                                         return html || '<div class="text-muted">No detailed inputs.</div>';
+                                                                                                                                                                                         }
+                                                                                                                                                                                         // Helper: extract GPS from payload
+                                                                                                                                                                                         function extractGpsFromPayload(p){
+                                                                                                                                                                                             try{
+                                                                                                                                                                                                 const inputs = (p && p.inputs) || {};
+                                                                                                                                                                                                 const keys = Object.keys(inputs).filter(k=>/^\d+$/.test(k));
+                                                                                                                                                                                                 for (const k of keys){
+                                                                                                                                                                                                     const v = inputs[k]||{};
+                                                                                                                                                                                                     if (!v.protocol || String(v.protocol).toLowerCase() !== 'sst') continue;
+                                                                                                                                                                                                         const gg = getGpsFrom(v);
+                                                                                                                                                                                                         if (gg) return gg;
+                                                                                                                                                                                                             }
+                                                                                                                                                                                                             }catch(_){ }
+                                                                                                                                                                                                             return null;
+                                                                                                                                                                                                             }
+                                                                                                                                                                                                             
+                                                                                                                                                                                                             // Per-device map state and refresh
+                                                                                                                                                                                                             window._devMaps = window._devMaps || {}; // { devId: { map, markers:Map, segments:Map, dropped:Map, lastPos:Map } }
+                                                                                                                                                                                                             window._pendingPayload = window._pendingPayload || {}; // devId -> last payload
+                                                                                                                                                                                                             window._devMapVisibility = window._devMapVisibility || {}; // devId -> boolean
+                                                                                                                                                                                                             
+                                                                                                                                                                                                             function ensureDevMap(devId, center){
+  const el = document.getElementById('devmap-'+devId);
+  if (!el || !window.L) return null;
+  let s = window._devMaps[devId];
+  if (!s){
+    const map = L.map(el, { zoomControl: true, attributionControl: true })
+                 .setView([center.lat, center.lng], 6);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+    s = window._devMaps[devId] = {
+      map,
+      markers:new Map(),
+      segments:new Map(),
+      dropped:new Map(),
+      lastPos:new Map(),
+      hasCenteredOnce:false,
+      userMoved:false
+    };
+    map.on('moveend', ()=>{ s.userMoved = true; });
+    map.on('zoomend', ()=>{ s.userMoved = true; });
+  }
+  return s;
+}
+                                                                                                                                                                                                                         
+                                                                                                                                                                                                                         function refreshDevMarkers(devId, payload, visible){
+  const s = window._devMaps[devId];
+  if (!s || !s.map) return;
+
+  if (visible === false){
+    for (const marker of s.markers.values()) marker.remove();
+    for (const arr of s.segments.values()) for (const poly of arr) poly.remove();
+    return;
+  }
+
+  const inputs = (payload && payload.inputs) || {};
+  const keys = Object.keys(inputs).filter(k=>/^\d+$/.test(k));
+  const present = new Set();
+
+  for (const k of keys){
+    const v = inputs[k] || {};
+    if ((String(v.protocol||'').toLowerCase() !== 'sst')) continue;
+    if ((String(v.status||'').toLowerCase() === 'off')) continue;
+
+    const gg = getGpsFrom(v);
+    if (!gg) continue;
+
+    const idKey = k;
+    present.add(idKey);
+    const pos = L.latLng(gg.lat, gg.lng);
+
+    const dropped = (v.notifications && v.notifications.dropped) || {};
+    const currDrop = { video: dropped.video || 0, audio: dropped.audio || 0, ts: dropped.ts || 0 };
+
+    if (s.markers.has(idKey)){
+      const marker = s.markers.get(idKey);
+      const prevPos = s.lastPos.get(idKey);
+      const prevDrop = s.dropped.get(idKey);
+
+      if (prevPos && prevDrop){
+        const changed = (currDrop.video!==prevDrop.video || currDrop.audio!==prevDrop.audio || currDrop.ts!==prevDrop.ts);
+        const color = changed ? '#dc3545' : '#28a745';
+        const poly = L.polyline([prevPos, pos], { color, opacity: 0.9, weight: 5 }).addTo(s.map);
+        if (!s.segments.has(idKey)) s.segments.set(idKey, []);
+        s.segments.get(idKey).push(poly);
+      }
+
+      const hex = getInputColor(idSafe(devId), idKey);
+      marker.setStyle({ color: '#000000', weight: 1, fillColor: hex, fillOpacity: 1, radius: 7 });
+      marker.setLatLng(pos);
+    } else {
+      const title = (payload.characteristics && (payload.characteristics.identifier || payload.characteristics.Identifier) || devId) + ' - ' + (v.identifier || ('input '+(parseInt(k,10)+1)));
+      const hex = getInputColor(idSafe(devId), idKey);
+      const marker = L.circleMarker(pos, { radius: 7, color: '#000000', weight: 1, fillColor: hex, fillOpacity: 1 }).addTo(s.map).bindTooltip(title);
+      s.markers.set(idKey, marker);
+    }
+
+    s.lastPos.set(idKey, pos);
+    s.dropped.set(idKey, currDrop);
+  }
+
+  for (const [key, marker] of Array.from(s.markers.entries())){
+    if (!present.has(key)){
+      marker.remove();
+      s.markers.delete(key);
+    }
+  }
+}
+                                                                                                                                                                                                                                                                             
+                                                                                                                                                                                                                                                                             function updateDeviceMapAndBadges(devId, payload){
+                                                                                                                                                                                                                                                                                 window._pendingPayload[devId] = payload;
+                                                                                                                                                                                                                                                                                 const gps = extractGpsFromPayload(payload);
+                                                                                                                                                                                                                                                                                 const center = gps ? gps : { lat:45.76853561401367, lng:4.89219999313354 };
+                                                                                                                                                                                                                                                                                 const s = ensureDevMap(devId, center);
+if (s){
+  if (gps && !s.hasCenteredOnce && !s.userMoved){
+    s.map.setView([center.lat, center.lng], s.map.getZoom() || 6);
+    s.hasCenteredOnce = true;
+  }
+  refreshDevMarkers(devId, payload, window._devMapVisibility[devId] !== false);
+}
+                                                                                                                                                                                                                                                                                             }
+                                                                                                                                                                                                                                                                                             
+                                                                                                                                                                                                                                                                                             
+                                                                                                                                                                                                                                                                                             async function pollOne(id){
+                                                                                                                                                                                                                                                                                                 try{
+                                                                                                                                                                                                                                                                                                     const res = await fetch('/data?id=' + encodeURIComponent(id));
+                                                                                                                                                                                                                                                                                                     const js = await res.json();
+                                                                                                                                                                                                                                                                                                     const st = document.getElementById('status-'+id);
+                                                                                                                                                                                                                                                                                                     const ts = document.getElementById('ts-'+id);
+                                                                                                                                                                                                                                                                                                     const bd = document.getElementById('body-'+id);
+                                                                                                                                                                                                                                                                                                     
+                                                                                                                                                                                                                                                                                                     if (js.ok) {
+                                                                                                                                                                                                                                                                                                         const tstr = new Date(js.timestamp).toLocaleTimeString();
+                                                                                                                                                                                                                                                                                                         st.textContent = 'OK (Last update: ' + tstr + ')';
+                                                                                                                                                                                                                                                                                                         st.className = 'badge text-bg-success';
+                                                                                                                                                                                                                                                                                                         ts.textContent = tstr;
+                                                                                                                                                                                                                                                                                                     } else {
+                                                                                                                                                                                                                                                                                                         st.textContent = 'ERROR';
+                                                                                                                                                                                                                                                                                                         st.className = 'badge text-bg-danger';
+                                                                                                                                                                                                                                                                                                         ts.textContent = '—';
+                                                                                                                                                                                                                                                                                                     }
+                                                                                                                                                                                                                                                                                                     
+                                                                                                                                                                                                                                                                                                     // 🔽 Affichage trié (si JSON), sinon fallback texte
+                                                                                                                                                                                                                                                                                                     bd.innerHTML = renderStreamHubPayload(js.payload);
+                                                                                                                                                                                                                                                                                                     updateDeviceMapAndBadges(id, js.payload);
+                                                                                                                                                                                                                                                                                                     if (window.drainMiniMaps) window.drainMiniMaps();
+                                                                                                                                                                                                                                                                                                         }catch(e){
+                                                                                                                                                                                                                                                                                                             const st = document.getElementById('status-'+id);
+                                                                                                                                                                                                                                                                                                             const bd = document.getElementById('body-'+id);
+                                                                                                                                                                                                                                                                                                             st.textContent = 'ERROR';
+                                                                                                                                                                                                                                                                                                             st.className = 'badge text-bg-danger';
+                                                                                                                                                                                                                                                                                                             bd.textContent = String(e);
+                                                                                                                                                                                                                                                                                                         }
+                                                                                                                                                                                                                                                                                                         }
+                                                                                                                                                                                                                                                                                                         
+                                                                                                                                                                                                                                                                                                         function startPolling(){
+                                                                                                                                                                                                                                                                                                             document.querySelectorAll('.card-status').forEach(card => {
+                                                                                                                                                                                                                                                                                                                                                               const id = card.dataset.deviceId;
+                                                                                                                                                                                                                                                                                                                                                               pollOne(id);
+                                                                                                                                                                                                                                                                                                                                                               setInterval(()=>pollOne(id), 5000);
+                                                                                                                                                                                                                                                                                                                                                               });
+                                                                                                                                                                                                                                                                                                         }
+                                                                                                                                                                                                                                                                                                         if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startPolling);
+                                                                                                                                                                                                                                                                                                         else startPolling();
+                                                                                                                                                                                                                                                                                                             // Google Maps mini-maps (robust queue + immediate render when ready)
+                                                                                                                                                                                                                                                                                                             window._miniMapsQueue = window._miniMapsQueue || [];
+                                                                                                                                                                                                                                                                                                             window._gmapsReady = false;
+                                                                                                                                                                                                                                                                                                             function renderMini(item){
+                                                                                                                                                                                                                                                                                                                 const el = document.getElementById(item.id);
+                                                                                                                                                                                                                                                                                                                 if (!window.google || !google.maps) { console.warn('MiniMap: Google Maps not ready'); return false; }
+                                                                                                                                                                                                                                                                                                                     if (!el) { console.warn('MiniMap: container not found', item.id); return false; }
+                                                                                                                                                                                                                                                                                                                         const map = new google.maps.Map(el, {
+                                                                                                                                                                                                                                                                                                                                                         center: {lat: item.lat, lng: item.lng},
+                                                                                                                                                                                                                                                                                                                                                         zoom: item.marker ? 12 : 6,
+                                                                                                                                                                                                                                                                                                                                                         mapTypeControl: false,
+                                                                                                                                                                                                                                                                                                                                                         streetViewControl: false
+                                                                                                                                                                                                                                                                                                                                                         });
+                                                                                                                                                                                                                                                                                                                                                         if (item.marker) new google.maps.Marker({position:{lat:item.lat,lng:item.lng}, map:map});
+                                                                                                                                                                                                                                                                                                                                                             return true;
+                                                                                                                                                                                                                                                                                                                                                             }
+                                                                                                                                                                                                                                                                                                                                                             window.addMiniMap = function(item){
+                                                                                                                                                                                                                                                                                                                                                                 window._miniMapsQueue = window._miniMapsQueue || [];
+                                                                                                                                                                                                                                                                                                                                                                 window._miniMapsQueue.push(item);
+                                                                                                                                                                                                                                                                                                                                                                 if (window._gmapsReady && window.drainMiniMaps) {
+                                                                                                                                                                                                                                                                                                                                                                     setTimeout(window.drainMiniMaps, 0);
+                                                                                                                                                                                                                                                                                                                                                                 }
+                                                                                                                                                                                                                                                                                                                                                                     };
+                                                                                                                                                                                                                                                                                                                                                                     function initMiniMaps(){
+                                                                                                                                                                                                                                                                                                                                                                         window._gmapsReady = true;
+                                                                                                                                                                                                                                                                                                                                                                         window.drainMiniMaps = function(){
+                                                                                                                                                                                                                                                                                                                                                                             if (!window._miniMapsQueue || !window._miniMapsQueue.length) return;
+                                                                                                                                                                                                                                                                                                                                                                                 const rest = [];
+                                                                                                                                                                                                                                                                                                                                                                                 while (window._miniMapsQueue.length){
+                                                                                                                                                                                                                                                                                                                                                                                     const it = window._miniMapsQueue.shift();
+                                                                                                                                                                                                                                                                                                                                                                                     if (!renderMini(it)) rest.push(it);
+                                                                                                                                                                                                                                                                                                                                                                                         }
+                                                                                                                                                                                                                                                                                                                                                                                         window._miniMapsQueue = rest;
+                                                                                                                                                                                                                                                                                                                                                                                         if (rest.length) setTimeout(window.drainMiniMaps, 250);
+                                                                                                                                                                                                                                                                                                                                                                                             };
+                                                                                                                                                                                                                                                                                                                                                                                             window.drainMiniMaps();
+                                                                                                                                                                                                                                                                                                                                                                                             // initialize device maps from any last-known payload
+                                                                                                                                                                                                                                                                                                                                                                                             if (window._pendingPayload){
+                                                                                                                                                                                                                                                                                                                                                                                                 for (const devId in window._pendingPayload){
+                                                                                                                                                                                                                                                                                                                                                                                                     updateDeviceMapAndBadges(devId, window._pendingPayload[devId]);
+                                                                                                                                                                                                                                                                                                                                                                                                 }
+                                                                                                                                                                                                                                                                                                                                                                                                     }
+                                                                                                                                                                                                                                                                                                                                                                                                     }
+                                                                                                                                                                                                                                                                                                                                                                                                     </script>
+                                                                                                                                                                                                                                                                                                                                                                                                     
+                                                                                                                                                                                                                                                                                                                                                                                                     % endif
+                                                                                                                                                                                                                                                                                                                                                                                                     </%block>

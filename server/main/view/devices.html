@@ -1,0 +1,113 @@
+<!--
+SPDX-License-Identifier: LGPL-2.1-or-later
+Copyright (C) 2026 Alexandre Licinio
+-->
+<%inherit file="base.html"/>
+    <%block name="body">
+    <div class="d-flex align-items-center">
+      <h1 class="h3 m-0">Devices</h1>
+      <%
+      try:
+          _cnt = device_count
+      except:
+          _cnt = len(devices) if devices else 0
+      try:
+          _max = int(max_streamhub)
+      except:
+          import os as _os
+          _max = int((_os.getenv('MAX_STREAMHUB') or '1').strip() or '1')
+      if _max < 1:
+          _max = 1
+      %>
+      <span class="badge text-bg-primary ms-3">${_cnt}/${_max}</span>
+    </div>
+    <div class="row">
+    <div class="col-lg-6">
+    % if _cnt < _max:
+    <form method="post" action="/devices_add" class="card p-3 mb-4">
+    <h2 class="h5">Add Haivision StreamHub</h2>
+    <div class="mb-2">
+    <label class="form-label">Name</label>
+    <input class="form-control" name="name" placeholder="My StreamHub">
+    </div>
+    <div class="mb-2">
+    <label class="form-label">Protocol</label>
+    <select class="form-select" name="protocol">
+    <option value="https" selected>https</option>
+    <option value="http">http</option>
+    </select>
+    </div>
+    <div class="mb-2">
+    <label class="form-label">Host</label>
+    <input class="form-control" name="host" placeholder="private or public ip">
+    </div>
+    <div class="mb-2">
+    <label class="form-label">Port</label>
+    <input class="form-control" name="port" value="8896">
+    </div>
+    <div class="mb-2">
+    <label class="form-label">API Path</label>
+    <input disabled class="form-control" name="api_path" value="/" placeholder="/">
+    <div class="form-text">Pour StreamHub (ancien probe) laisser “/”.</div>
+    </div>
+    <div class="mb-2">
+    <label class="form-label">API key (tokenId)</label>
+    <input class="form-control" name="token" placeholder="ex: 1a2b3c...">
+    </div>
+    <button class="btn btn-primary">Add</button>
+    </form>
+    % else:
+    <div class="card p-3 mb-4">
+    <h2 class="h5">Add Haivision StreamHub</h2>
+    <div class="text-muted">Max StreamHub(s) reached: ${_cnt}/${_max}. You cannot add another one.</div>
+    </div>
+    % endif
+    </div>
+    
+    <div class="col-lg-6">
+    <div class="card p-3">
+    <h2 class="h5">Existing devices</h2>
+    % if not devices:
+    <div class="text-muted">None yet.</div>
+    % else:
+    <ul class="list-group">
+    % for d in devices:
+    <li class="list-group-item d-flex justify-content-between align-items-center">
+    <div>
+    <strong>${d['name']}</strong>
+    <div class="small text-muted">${d['protocol']}://${d['host']}:${d['port']}${d['api_path']}</div>
+    </div>
+    <form method="post" action="/devices_delete" onsubmit="return confirm('Delete this device?')">
+    <input type="hidden" name="id" value="${d['id']}"/>
+    <button class="btn btn-outline-danger btn-sm">Delete</button>
+    </form>
+    </li>
+    % endfor
+    </ul>
+    % endif
+    </div>
+    </div>
+    </div>
+    <script>
+    (function(){
+     const proto = document.querySelector('select[name="protocol"]');
+     const port  = document.querySelector('input[name="port"]');
+     if (!proto || !port) return;
+     const defaults = { http: 8893, https: 8896 };
+     
+     function maybeSetDefault(){
+     const p = proto.value;
+     // Ne change le port que s’il ressemble à un port “générique” saisi par erreur
+     const v = parseInt(port.value, 10);
+     if (!v || v===80 || v===443 || v===defaults.http || v===defaults.https){
+     port.value = defaults[p] || '';
+     }
+     port.placeholder = String(defaults[p] || '');
+     }
+     
+     proto.addEventListener('change', maybeSetDefault);
+     // premier passage
+     maybeSetDefault();
+     })();
+     </script>
+     </%block>
