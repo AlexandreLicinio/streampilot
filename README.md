@@ -61,11 +61,10 @@ On the first run, all files and the database will be created automatically.
 Set the listening port (example: 5555) and start the server from the project root:
 
 ```bash
-StreamPilot=5555 CLIENT_NAME="John Dear" MAX_STREAMHUB=4 bin/python -m server.main.server
+bin/python -m streampilot -port 5555 -name "John Dear" -max_streamhubs 4
 ```
+You can also specify port, name, max_streamhubs thru the following environment variables
 
-> **Environment variables**
->
 > - `StreamPilot`: UI TCP port (default: 5555)
 > - `CLIENT_NAME`: Generic name displayed in the UI
 > - `MAX_STREAMHUB`: Maximum number of StreamHubs polled by the app (default: 4)
