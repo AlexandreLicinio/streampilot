@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 # Copyright (C) 2026 Alexandre Licinio
+__version__ = '0.1.0'
 import sys
 from pathlib import Path
 HERE = Path(__file__).resolve()
@@ -2043,7 +2044,7 @@ def run():
     cherrypy.engine.subscribe('stop', _on_stop)
 
     # Enable static file serving for /static if not already enabled
-    cherrypy.tree.mount(None, '/static', {'/': {'tools.staticdir.on': True, 'tools.staticdir.dir': str(ROOT / 'static')}})
+    cherrypy.tree.mount(None, '/static', {'/': {'tools.staticdir.on': True, 'tools.staticdir.dir': str(BASE_DIR / 'static')}})
     cherrypy.quickstart(App())
 
 if __name__ == "__main__":

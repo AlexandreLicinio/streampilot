@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "streampilot"
+authors = [
+  {name = "Alexandre Licinio", email = ""},
+]
+description = "Stream smarter. Pilot with precision. Broadcast better."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "LGPL-2.1-or-later"
+license-files = ["README_LICENSE_SECTION.md", "LICENSE"]
+keywords = ["gps", "4G", "5G"]
+dependencies = [
+  "requests",
+  "CherryPy",
+  "Mako",
+]
+dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/AlexandreLicinio/streampilot"
+
+[tool]
+[tool.hatch.version]
+path = "streampilot/server.py"
+[tool.hatch.build.targets.wheel]
+packages = ["streampilot"]

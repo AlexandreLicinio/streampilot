@@ -14,9 +14,9 @@ class LiveLogger:
         self.lock = threading.RLock()
         self.last_payloads: Dict[str, dict] = {}
         self._stop = False
+        self.sessions_en_cours: Dict[Tuple[str,str], Dict[str, Any]] = {}
         self._thread = threading.Thread(target=self._run_ticker, name="live_logger_ticker", daemon=True)
         self._thread.start()
-        self.sessions_en_cours: Dict[Tuple[str,str], Dict[str, Any]] = {}
         self._init_db()
 
     def _conn(self):
