@@ -65,9 +65,9 @@ bin/python -m streampilot -port 5555 -name "John Dear" -max_streamhubs 4
 ```
 You can also specify port, name, max_streamhubs thru the following environment variables
 
-> - `StreamPilot`: UI TCP port (default: 5555)
-> - `CLIENT_NAME`: Generic name displayed in the UI
-> - `MAX_STREAMHUB`: Maximum number of StreamHubs polled by the app (default: 4)
+> - `-port`: UI TCP port (default: 5555)
+> - `-name`: Generic name displayed in the UI
+> - `-max_streamhubs`: Maximum number of StreamHubs polled by the app (default: 4)
 
 The app will be available at [http://localhost:5555](http://localhost:5555).
 
