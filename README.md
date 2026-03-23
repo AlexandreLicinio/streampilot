@@ -42,7 +42,7 @@ You **don’t** need to be **root** to install or run StreamPilot.
 1. Download the project and create a Python virtual environment in the folder:
 
 ```bash
-https://github.com/AlexandreLicinio/streampilot.git
+git clone https://github.com/AlexandreLicinio/streampilot.git
 cd streampilot
 python3 -m venv --system-site-packages .
 ```
