@@ -16,9 +16,15 @@ Ideal for mobile broadcast: cycle tours, marathons, triathlons, remote productio
 Raw data is provided by **Haivision StreamHub** via its REST API (HTTP/HTTPS). All network interfaces and GPS are monitored.
 AIRxxx and PROxxx series are the ones with GPS sensors.
 
+Also, it can provides powerfull pdf reports at the end of a live. The reports contains correlated logs from the StreamHub from each inputs in live to help you sharing the right information.
+
 ### What’s next for StreamPilot?
 
 Today, StreamHub’s REST API doesn’t expose every modem details (Band, Operator name, SNR, RSSI, priority). The goal is for **StreamPilot** to actively **pilot each modem**, switching live to the best interface(s). This would raise transmission quality by automatically managing interface priorities.
+
+### Why StreamPilot?
+
+Just because I needed a tool for site surveys and live production in my company Wiftech. I am not working for Haivision but I did choose Aviwest as main gear to do live streaming for my clients. I encourage all the "bonded live video constructors" to share in their api all the raw data we need to make StreamPilot better.
 
 ---
 
@@ -116,6 +122,8 @@ While the transmitter is **live**, charts and timeline progress continuously. If
 ### Slack notifications:
 
 Follow the instructions to create a webhook [https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/), open **Settings** and configure the global settings. Then configure for each StreamHub.
+
+In the **Ignore contains (one filter per line)** box, you can add all or part of a log to filter it and avoid receiving it. This is very useful for preventing alerts about irrelevant information.
 
 ---
 

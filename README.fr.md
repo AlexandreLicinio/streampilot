@@ -16,9 +16,15 @@ Idéal pour le broadcast en mobilité : Tour cycliste, marathons, triathlons, pr
 Les données brutes sont fournies par le **Haivision Streamhub** qui collecte et distribue via une API REST (HTTP/HTTPS). Toutes les interfaces réseaux et le GPS sont monitorés.
 Les séries AIRxxx et PROxxx sont celles disposant d'un capteur GPS.
 
+De plus, il génère des rapports PDF détaillés à la fin d'un live. Ces rapports contiennent les logs StreamHub correspondants pour chaque transmetteurs, vous permettant ainsi de partager les informations pertinentes.
+
 ### Le futur de Streampilot ?
 
-À ce jour, il n'est pas possible d'obtenir via l'API REST du StreamHub toutes les informations techniques de chaque modem (Bande, Nom de l'opérateur, SNR, RSSI et priorité). Mon but est que **StreamPilot** puisse piloter chaque modem afin de commuter en live le ou les meilleurs interfaces réseaux. Cela permettrait de garantir une qualité de transmission supérieure en rendant automatique la gestion de priorité des interfaces. 
+À ce jour, il n'est pas possible d'obtenir via l'API REST du StreamHub toutes les informations techniques de chaque modem (Bande, Nom de l'opérateur, SNR, RSSI et priorité). Mon but est que **StreamPilot** puisse piloter chaque modem afin de commuter en live le ou les meilleurs interfaces réseaux. Cela permettrait de garantir une qualité de transmission supérieure en rendant automatique la gestion de priorité des interfaces.
+
+### Pourquoi StreamPilot?
+
+J'avais besoin d'un outil pour les repérages et les live pour Wiftech, ma société. Je ne travaille pas pour Haivision, mais j'ai choisi Aviwest comme équipement principal pour la diffusion en live pour mes clients et différents services. J'encourage tous les fabricants de matériels de vidéo en direct à partager dans leur API toutes les données brutes nécessaires à l'amélioration de StreamPilot.
 
 ---
 
@@ -117,6 +123,8 @@ Tant que le transmetteur est en **live**, les graphiques et la timeline vont pro
 ### Slack notifications:
 
 Suivez les instructions via ce lien [https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/), dans le menu **Settings** configurez les détails concernant le webhook puis pour chaque StreamHub les détails cocnernant chaque type de notifications.
+
+Dans l'encadré **Ignore contains (one filter per line)** vous pouvez ajouter tout ou partie d'un log afin de le filtrer et de ne pas le recevoir. Cela est très pratique pour ne pas être alerté à propos d'une information non pertinente.
 
 ---
 
