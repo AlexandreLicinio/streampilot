@@ -4,7 +4,7 @@ __version__ = '0.1.0'
 import sys
 from pathlib import Path
 HERE = Path(__file__).resolve()
-PROJECT_ROOT = HERE.parents[2]
+PROJECT_ROOT = HERE.parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
     
@@ -24,7 +24,7 @@ except Exception:
     from logger import LiveLogger    # cas script direct
 
 BASE_DIR = Path(__file__).resolve().parent
-ROOT = BASE_DIR.parent.parent  # project root
+ROOT = BASE_DIR.parent  # project root
 DB_PATH = ROOT / "mini.db"
 APP_META = {"client": None, "status": None}
 
@@ -2044,7 +2044,12 @@ def run():
     cherrypy.engine.subscribe('stop', _on_stop)
 
     # Enable static file serving for /static if not already enabled
-    cherrypy.tree.mount(None, '/static', {'/': {'tools.staticdir.on': True, 'tools.staticdir.dir': str(BASE_DIR / 'static')}})
+    static_dir = BASE_DIR / 'static'
+    static_dir.mkdir(parents=True, exist_ok=True)
+    cherrypy.tree.mount(None, '/static', {'/': {
+        'tools.staticdir.on': True,
+        'tools.staticdir.dir': str(static_dir)
+    }})
     cherrypy.quickstart(App())
 
 if __name__ == "__main__":
