@@ -25,7 +25,7 @@ Today, StreamHub’s REST API doesn’t expose every modem details (Band, Operat
 ### Roadmap
 
 - [x] Haivision SST transmitters
-- [ ] Slack notifications
+- [x] Slack notifications
 - [ ] Modem and priority control (requires deeper API access from Haivision)
 
 ---
@@ -113,6 +113,10 @@ Sessions are accessible from the **Logs** menu. Click **View** on the running se
 
 While the transmitter is **live**, charts and timeline progress continuously. If you uncheck **Follow live**, you can move the timeline to inspect a specific moment (GPS + INTERFACES).
 
+### Slack notifications:
+
+Follow the instructions to create a webhook [https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/), open **Settings** and configure the global settings. Then configure for each StreamHub.
+
 ---
 
 ## Features
@@ -133,6 +137,7 @@ While the transmitter is **live**, charts and timeline progress continuously. If
 - **Background poller** independent from the UI (captures sessions even if the Dashboard isn’t open)
 - **Light/Dark theme** toggle
 - **Responsive dashboard** (Bootstrap 5)
+- **Notifications slack** via webhook
 
 ---
 

@@ -62,6 +62,164 @@ class BackgroundPoller:
         self.last_error = None
         self.age_history = {}  # host -> deque[(ts, age_sec)]
         self.age_window_sec = 120
+        self.slack_seen = {}          # host -> deque of log fingerprints
+        self.slack_seen_max = 4000
+        self.alert_state = {}         # host -> {owd,bitrate,drops,error,active_sessions}
+        self._slack_initialized = set()
+
+    # ── Slack helpers ─────────────────────────────────────────────────────
+
+    def _load_slack_cfg(self):
+        try:
+            with connect_db() as c:
+                r = c.execute('SELECT webhook_url,channel,username FROM slack_config WHERE id=1').fetchone()
+            if r and r[0] and r[0].strip():
+                return r[0].strip(), (r[1] or '#streampilot'), (r[2] or 'StreamPilot')
+        except Exception: pass
+        return None
+
+    def _load_device_slack(self, device_id):
+        _COLS = 'device_id,notify_session,notify_drops,notify_owd_threshold,'\
+                'notify_bitrate_min,notify_poller_error,notify_logs,notify_paused,ignore_contains'
+        try:
+            with connect_db() as c:
+                c.execute('INSERT OR IGNORE INTO device_slack(device_id) VALUES(?)', (device_id,))
+                r = c.execute(f'SELECT {_COLS} FROM device_slack WHERE device_id=?', (device_id,)).fetchone()
+            if r:
+                return dict(zip(_COLS.split(','), r))
+        except Exception: pass
+        return {}
+
+    @staticmethod
+    def _slack_post(webhook, text, channel, username, color=None, title=None):
+        import json as _j, urllib.request, urllib.parse
+        payload = {'channel': channel, 'username': username, 'text': ''}
+        if color or title:
+            att = {'color': color or '#439FE0', 'text': text, 'mrkdwn_in': []}
+            if title: att['title'] = title
+            payload['attachments'] = [att]
+        else:
+            payload['text'] = text
+        body = urllib.parse.urlencode({'payload': _j.dumps(payload, ensure_ascii=False)}).encode('utf-8')
+        req = urllib.request.Request(webhook, data=body,
+            headers={'Content-Type': 'application/x-www-form-urlencoded'}, method='POST')
+        try:
+            with urllib.request.urlopen(req, timeout=6) as r: r.read()
+        except Exception as e:
+            cherrypy.log(f'[slack] post error: {e}')
+
+    def _notify_new_logs(self, host, device_id, dev_name, log_entries, cfg, ds):
+        import json as _j, hashlib as _hl, re as _re
+        if not ds.get('notify_logs') or ds.get('notify_paused'): return
+        webhook, channel, username = cfg
+        ignore_list = []
+        try: ignore_list = [s.lower() for s in _j.loads(ds.get('ignore_contains') or '[]') if s.strip()]
+        except Exception: pass
+        dq = self.slack_seen.setdefault(host, deque(maxlen=self.slack_seen_max))
+        seen_set = set(dq)
+        if host not in self._slack_initialized:
+            for e in log_entries:
+                fp = e.get('fp') or _hl.sha1((e.get('raw') or '').encode()).hexdigest()
+                dq.append(fp)
+            self._slack_initialized.add(host)
+            return
+        for e in log_entries:
+            fp = e.get('fp') or _hl.sha1((e.get('raw') or '').encode()).hexdigest()
+            if fp in seen_set: continue
+            raw_line = e.get('raw') or f"{e.get('ts','')} {e.get('message','')}"
+            if ignore_list and any(s in raw_line.lower() for s in ignore_list):
+                dq.append(fp); seen_set.add(fp); continue
+            level = (e.get('level') or 'INFO').upper()
+            color_map = {'ERROR':'danger','WARN':'warning','WARNING':'warning','INFO':'#439FE0','DEBUG':'#9B9B9B'}
+            slack_line = _re.sub(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\s+', '', raw_line)
+            self._slack_post(webhook, slack_line, channel, username,
+                             color=color_map.get(level, '#439FE0'), title=dev_name)
+            dq.append(fp); seen_set.add(fp)
+
+    def _notify_alerts(self, host, device_id, dev_name, payload, cfg, ds):
+        if ds.get('notify_paused'): return
+        webhook, channel, username = cfg
+        state = self.alert_state.setdefault(host, {
+            'owd': False, 'bitrate': False, 'drops': False, 'error': False, 'active_sessions': 0
+        })
+        inputs = (payload or {}).get('inputs', {})
+        active = [v for k, v in inputs.items()
+                  if str(k).isdigit() and (v or {}).get('status') == 'on'
+                  and (v or {}).get('protocol', '').lower() == 'sst']
+        if ds.get('notify_session'):
+            prev, cur = state['active_sessions'], len(active)
+            if cur > prev:
+                for v in active:
+                    nm = v.get('identifier') or v.get('source_name') or 'unknown'
+                    self._slack_post(webhook, f'*{dev_name}* — Session started: `{nm}`',
+                                     channel, username, color='good')
+            elif cur < prev:
+                _prev_names = state.get('last_active_names', '')
+                _stopped_msg = f':red_circle: *{dev_name}* — Session stopped ({prev} -> {cur} active)'
+                if _prev_names: _stopped_msg += f': {_prev_names}'
+                self._slack_post(webhook, _stopped_msg, channel, username, color='danger')
+            state['active_sessions'] = cur
+            state['last_active_names'] = ', '.join(
+                f"`{v.get('identifier') or v.get('source_name') or 'unknown'}`"
+                for v in active
+            )
+        if not active: return
+        # Build a label listing all active transmitter identifiers
+        active_names = ', '.join(
+            f"`{v.get('identifier') or v.get('source_name') or 'unknown'}`"
+            for v in active
+        )
+        max_owd, total_rb, total_dv, total_dt = 0, 0, 0, 0
+        worst_input_owd = 'unknown'
+        worst_input_rb  = 'unknown'
+        for v in active:
+            nm = v.get('identifier') or v.get('source_name') or 'unknown'
+            L = v.get('links') or {}
+            rb = int(L.get('total_rx_bitrate_from_links') or 0)
+            total_rb += rb
+            if rb < (int(ds.get('notify_bitrate_min') or 0) or 999999):
+                worst_input_rb = nm
+            for lk, ls in L.items():
+                if str(lk).isdigit():
+                    owd = (ls or {}).get('owdR')
+                    if isinstance(owd, (int, float)) and int(owd) > max_owd:
+                        max_owd = int(owd)
+                        worst_input_owd = nm
+            notif = (v.get('notifications') or {}).get('dropped') or {}
+            total_dv += int(notif.get('video') or 0)
+            total_dt += int(notif.get('ts') or 0)
+        owd_thr = int(ds.get('notify_owd_threshold') or 0)
+        if owd_thr > 0:
+            bad = max_owd >= owd_thr
+            if bad and not state['owd']:
+                self._slack_post(webhook,
+                    f':warning: *{dev_name}* — `{worst_input_owd}` OWD high: *{max_owd} ms* (thr {owd_thr} ms)',
+                    channel, username, color='warning'); state['owd'] = True
+            elif not bad and state['owd']:
+                self._slack_post(webhook,
+                    f':white_check_mark: *{dev_name}* — `{worst_input_owd}` OWD normal: {max_owd} ms',
+                    channel, username, color='good'); state['owd'] = False
+        rb_min = int(ds.get('notify_bitrate_min') or 0)
+        if rb_min > 0:
+            bad = total_rb < rb_min
+            if bad and not state['bitrate']:
+                self._slack_post(webhook,
+                    f':warning: *{dev_name}* — `{worst_input_rb}` Bitrate low: *{total_rb} kb/s* (min {rb_min})',
+                    channel, username, color='warning'); state['bitrate'] = True
+            elif not bad and state['bitrate']:
+                self._slack_post(webhook,
+                    f':white_check_mark: *{dev_name}* — {active_names} Bitrate OK: {total_rb} kb/s',
+                    channel, username, color='good'); state['bitrate'] = False
+        if ds.get('notify_drops'):
+            bad = total_dv > 0 or total_dt > 0
+            if bad and not state['drops']:
+                self._slack_post(webhook,
+                    f':rotating_light: *{dev_name}* — {active_names} Drops: video={total_dv} ts={total_dt}',
+                    channel, username, color='danger'); state['drops'] = True
+            elif not bad and state['drops']:
+                self._slack_post(webhook,
+                    f':white_check_mark: *{dev_name}* — {active_names} No more drops',
+                    channel, username, color='good'); state['drops'] = False
 
     def start(self):
         if self._thr and self._thr.is_alive():
@@ -113,10 +271,36 @@ class BackgroundPoller:
                                 ok_logs, log_entries = fetch_logs_structured(base, token or None, timeout=5)
                                 if ok_logs and log_entries:
                                     _persist_logs(host, log_entries)
+                                    try:
+                                        _sc = self._load_slack_cfg()
+                                        if _sc:
+                                            _ds = self._load_device_slack(did)
+                                            self._notify_new_logs(host, did, name or host, log_entries, _sc, _ds)
+                                    except Exception as _sle:
+                                        cherrypy.log(f'[slack] log notify: {_sle}')
                             except Exception as _log_err:
                                 cherrypy.log(f"[poller] logs persist error: {_log_err}")
+                            # Slack threshold alerts
+                            try:
+                                _sc2 = self._load_slack_cfg()
+                                if _sc2 and ok:
+                                    _ds2 = self._load_device_slack(did)
+                                    self._notify_alerts(host, did, name or host, payload, _sc2, _ds2)
+                            except Exception as _sae:
+                                cherrypy.log(f'[slack] alert: {_sae}')
                         except Exception as obs_err:
                             cherrypy.log(f"[poller] observe_payload error: {obs_err}")
+                            # Slack poller error
+                            try:
+                                _sc3 = self._load_slack_cfg()
+                                if _sc3:
+                                    _ds3 = self._load_device_slack(did)
+                                    if _ds3.get('notify_poller_error') and not _ds3.get('notify_paused'):
+                                        _st = self.alert_state.setdefault(host, {})
+                                        if not _st.get('error'):
+                                            self._slack_post(_sc3[0], f':x: *{name or host}* StreamHub unreachable', _sc3[1], _sc3[2], color='danger')
+                                            _st['error'] = True
+                            except Exception: pass
                         # Update age history for this host (based on last sample ts in DB)
                         try:
                             with connect_db() as db2:
@@ -171,6 +355,30 @@ def _ensure_db_indexes(db):
         db.execute("CREATE INDEX IF NOT EXISTS idx_live_sample_sid_id ON live_sample(session_id, id)")
     except Exception: pass
 
+def _filter_logs_for_input(rows, input_index, input_identifier):
+    """Filter StreamHub log rows for a specific session input."""
+    import re as _re2
+    _PAT = _re2.compile(
+        r'(?:source\s*#|\bfor\s+input\s+|\bstopping live for input\s+)(\d+)',
+        _re2.IGNORECASE
+    )
+    idx_str = str(input_index) if input_index is not None else None
+    ident_lower = (input_identifier or '').strip().lower()
+    result = []
+    for row in rows:
+        msg = (row[-1] or '')
+        m = _PAT.search(msg)
+        if m:
+            # Log explicitly references a source/input number
+            if idx_str and m.group(1) == idx_str:
+                result.append(row)
+            # else: other input, skip
+        else:
+            # Generic log or identifier match — include
+            result.append(row)
+    return result
+
+
 def connect_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     # isolation_level=None => autocommit explicite, utile pour WAL
@@ -208,7 +416,41 @@ def connect_db():
     try:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_shlog_host_ts ON streamhub_log(device_host, ts)")
     except Exception: pass
-    
+
+    # Slack global config
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS slack_config (
+            id INTEGER PRIMARY KEY CHECK(id=1),
+            webhook_url TEXT DEFAULT '',
+            channel TEXT DEFAULT '#streampilot',
+            username TEXT DEFAULT 'StreamPilot'
+        )""")
+    conn.execute("INSERT OR IGNORE INTO slack_config(id) VALUES(1)")
+
+    # Per-device Slack settings
+    _DI = ('["StreamHub user admin","StreamHub is disconnected from Aviwest Hub service",'
+           '"StreamHub is connected to Aviwest Hub service","read ECONNRESET",'
+           '"Nodejs is restarting...","502 Server Error","HTTPSConnectionPool"]')
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS device_slack ("
+        "device_id INTEGER PRIMARY KEY,"
+        "notify_session INTEGER DEFAULT 1,"
+        "notify_drops INTEGER DEFAULT 1,"
+        "notify_owd_threshold INTEGER DEFAULT 0,"
+        "notify_bitrate_min INTEGER DEFAULT 0,"
+        "notify_poller_error INTEGER DEFAULT 1,"
+        "notify_logs INTEGER DEFAULT 1,"
+        "notify_paused INTEGER DEFAULT 0,"
+        "ignore_contains TEXT DEFAULT '" + _DI + "'"
+        ")"
+    )
+    # Migration for existing DBs
+    try:
+        _ec = {r[1] for r in conn.execute("PRAGMA table_info(device_slack)").fetchall()}
+        if "notify_paused" not in _ec:
+            conn.execute("ALTER TABLE device_slack ADD COLUMN notify_paused INTEGER DEFAULT 0")
+    except Exception: pass
+
     return conn
 
 def _persist_logs(host: str, entries: list):
@@ -884,6 +1126,19 @@ class App:
                 "rx_lost_nb_packets": rx_lost_nb_packets,
             })
         payload["samples"] = [by_ts[k] for k in sorted(by_ts.keys())]
+        try:
+            ts_sc = s[7][:19].replace("T"," ") if s[7] else ""
+            ts_ec = s[8][:19].replace("T"," ") if s[8] else ""
+            with connect_db() as c2:
+                ev_r = c2.execute(
+                    "SELECT ts,node,level,message FROM streamhub_log "
+                    "WHERE device_host=? AND ts>=?" + (" AND ts<=?" if ts_ec else "") + " ORDER BY ts ASC",
+                    (s[2], ts_sc) + ((ts_ec,) if ts_ec else ())
+                ).fetchall() if ts_sc else []
+            ev_r = _filter_logs_for_input(ev_r, s[4], s[5])
+            payload["events"] = [{"ts":r[0],"node":r[1],"level":r[2],"message":r[3]} for r in ev_r]
+        except Exception:
+            payload["events"] = []
         data = json.dumps(payload, ensure_ascii=False, separators=(',',':'))
         cherrypy.response.headers['Content-Disposition'] = f'attachment; filename=session_{sid}.json'
         return data.encode("utf-8")
@@ -1295,53 +1550,14 @@ class App:
 
         import json as _json
         _t_end_js = ("new Date(" + _json.dumps(str(s_end)) + ").getTime()") if s_end else "Date.now()"
-        _events_timeline_html = f"""<div class="mt-4">
-              <div class="fw-semibold small mb-1">Events <span class="text-muted fw-normal">(logs StreamHub)</span></div>
-              <div id="eventsTimeline" style="min-height:44px;border:1px solid #dee2e6;border-radius:4px;padding:4px 8px;">
-                <span class="text-muted small">Chargement\u2026</span>
-              </div>
-            </div>
-            <script>
-            (function(){{
-              var SESSION_ID={s_id};
-              var T_START=new Date({_json.dumps(str(s_start or ''))}).getTime();
-              var T_END={_t_end_js};
-              var LEVEL_COLOR={{ERROR:'#dc3545',WARNING:'#fd7e14',WARN:'#fd7e14',INFO:'#0d6efd',DEBUG:'#6c757d'}};
-              fetch('/session_events?session_id='+SESSION_ID)
-                .then(function(r){{return r.json();}})
-                .then(function(data){{
-                  var el=document.getElementById('eventsTimeline');
-                  if(!data.ok||!data.events||!data.events.length){{
-                    el.innerHTML='<span class="text-muted small">Aucun event trouv\xe9 pour cette session.</span>';
-                    return;
-                  }}
-                  var evs=data.events;
-                  var W=1000,H=44,cy=H/2;
-                  var svg='<svg width="100%" height="'+H+'" viewBox="0 0 '+W+' '+H+'" xmlns="http://www.w3.org/2000/svg" style="display:block">';
-                  svg+='<rect x="0" y="'+(cy-2)+'" width="'+W+'" height="4" fill="#dee2e6" rx="2"/>';
-                  var dur=T_END-T_START||1;
-                  evs.forEach(function(ev){{
-                    var t=new Date(ev.ts).getTime();
-                    var x=Math.max(6,Math.min(W-6,Math.round((t-T_START)/dur*W)));
-                    var col=LEVEL_COLOR[ev.level]||'#0d6efd';
-                    var msg=(ev.message||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
-                    svg+='<line x1="'+x+'" y1="4" x2="'+x+'" y2="'+(H-4)+'" stroke="'+col+'" stroke-width="1.5" opacity="0.4"/>';
-                    svg+='<circle cx="'+x+'" cy="'+cy+'" r="5" fill="'+col+'" data-ts="'+ev.ts+'" data-lvl="'+(ev.level||'')+'" data-msg="'+msg+'" style="cursor:pointer"/>';
-                  }});
-                  svg+='</svg>';
-                  el.innerHTML=svg;
-                  var tip=document.createElement('div');
-                  tip.style.cssText='position:fixed;background:#212529;color:#fff;padding:5px 10px;border-radius:5px;font-size:11px;pointer-events:none;display:none;max-width:480px;z-index:9999;white-space:pre-wrap;';
-                  document.body.appendChild(tip);
-                  el.querySelectorAll('circle').forEach(function(c){{
-                    c.addEventListener('mouseenter',function(){{tip.textContent=c.dataset.ts+'  ['+c.dataset.lvl+']\n'+c.dataset.msg;tip.style.display='block';}});
-                    c.addEventListener('mousemove',function(e){{tip.style.left=(e.clientX+14)+'px';tip.style.top=(e.clientY-10)+'px';}});
-                    c.addEventListener('mouseleave',function(){{tip.style.display='none';}});
-                  }});
-                }})
-                .catch(function(){{document.getElementById('eventsTimeline').innerHTML='<span class="text-muted small">Erreur chargement events.</span>';}});
-            }})();
-            </script>"""
+        _events_js_tpl = '(function(){\nvar SESSION_ID=__SID__;\nvar T_START=new Date(__TSTART__).getTime();\nvar T_END=__TEND__;\nvar NL=String.fromCharCode(10);\nvar LEVEL_COLOR={ERROR:"#dc3545",WARNING:"#fd7e14",WARN:"#fd7e14",INFO:"#0d6efd",DEBUG:"#6c757d"};\nvar LEVEL_BADGE={ERROR:"<span class=\'badge\' style=\'background:#dc3545\'>ERROR</span>",WARNING:"<span class=\'badge\' style=\'background:#fd7e14\'>WARN</span>",INFO:"<span class=\'badge\' style=\'background:#0d6efd\'>INFO</span>",DEBUG:"<span class=\'badge\' style=\'background:#6c757d\'>DEBUG</span>"};\nvar tip=document.createElement("div");\ntip.style.cssText="position:fixed;background:#212529;color:#fff;padding:5px 10px;border-radius:5px;font-size:11px;pointer-events:none;display:none;max-width:480px;z-index:9999;white-space:pre-wrap;";\ndocument.body.appendChild(tip);\nfunction renderEvents(evs){\nvar el=document.getElementById("eventsTimeline");\nvar listWrap=document.getElementById("eventsListWrap");\nvar tbody=document.getElementById("eventsList");\nif(!evs||!evs.length){el.innerHTML="<span class=\'text-muted small\'>Aucun event trouv\\u00e9 pour cette session.</span>";listWrap.style.display="none";return;}\nvar W=1000,H=44,cy=H/2,tEnd=T_END;if(tEnd<=T_START)tEnd=T_START+1;\nvar dur=tEnd-T_START||1;\nvar svg=\'<svg width="100%" height="\'+H+\'" viewBox="0 0 \'+W+\' \'+H+\'" xmlns="http://www.w3.org/2000/svg" style="display:block">\';\nsvg+=\'<rect x="0" y="\'+(cy-2)+\'" width="\'+W+\'" height="4" fill="#dee2e6" rx="2"/>\';\nevs.forEach(function(ev,i){\nvar t=new Date(ev.ts).getTime();\nvar x=Math.max(6,Math.min(W-6,Math.round((t-T_START)/dur*W)));\nvar col=LEVEL_COLOR[ev.level]||"#0d6efd";\nvar msg=(ev.message||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/"/g,"&quot;");\nsvg+=\'<line x1="\'+x+\'" y1="4" x2="\'+x+\'" y2="\'+(H-4)+\'" stroke="\'+col+\'" stroke-width="1.5" opacity="0.4"/>\';\nsvg+=\'<circle cx="\'+x+\'" cy="\'+cy+\'" r="5" fill="\'+col+\'" data-idx="\'+i+\'" data-ts="\'+ev.ts+\'" data-lvl="\'+(ev.level||"")+\'" data-msg="\'+msg+\'" style="cursor:pointer"/>\';\n});\nsvg+=\'</svg>\';el.innerHTML=svg;\nvar rows="";\nevs.forEach(function(ev,i){\nvar badge=LEVEL_BADGE[ev.level]||LEVEL_BADGE["INFO"];\nvar msg=(ev.message||"").replace(/&/g,"&amp;").replace(/</g,"&lt;");\nrows+=\'<tr data-idx="\'+i+\'" style="cursor:pointer"><td class="text-muted">\'+ev.ts+\'</td><td>\'+badge+\'</td><td>\'+msg+\'</td></tr>\';\n});\ntbody.innerHTML=rows;listWrap.style.display="block";\nfunction highlightDot(idx,on){var c=el.querySelector(\'circle[data-idx="\'+idx+\'"]\');if(!c)return;c.setAttribute("r",on?"9":"5");c.setAttribute("stroke",on?"#fff":"none");c.setAttribute("stroke-width",on?"2":"0");}\nfunction highlightRow(idx,on){var tr=tbody.querySelector(\'tr[data-idx="\'+idx+\'"]\');if(!tr)return;tr.style.background=on?"#e8f4fd":"";if(on)tr.scrollIntoView({block:"nearest",behavior:"smooth"});}\ntbody.querySelectorAll("tr").forEach(function(tr){var idx=tr.dataset.idx;tr.addEventListener("mouseenter",function(){highlightDot(idx,true);});tr.addEventListener("mouseleave",function(){highlightDot(idx,false);});});\nel.querySelectorAll("circle").forEach(function(c){\nc.addEventListener("mouseenter",function(){highlightDot(c.dataset.idx,true);highlightRow(c.dataset.idx,true);tip.textContent=c.dataset.ts+"  ["+c.dataset.lvl+"]"+NL+c.dataset.msg;tip.style.display="block";});\nc.addEventListener("mousemove",function(e){tip.style.left=(e.clientX+14)+"px";tip.style.top=(e.clientY-10)+"px";});\nc.addEventListener("mouseleave",function(){highlightDot(c.dataset.idx,false);highlightRow(c.dataset.idx,false);tip.style.display="none";});\n});}\nfunction fetchEvents(){fetch("/session_events?session_id="+SESSION_ID).then(function(r){return r.json();}).then(function(data){renderEvents(data.ok?data.events:[]);}).catch(function(){document.getElementById("eventsTimeline").innerHTML="<span class=\'text-muted small\'>Erreur chargement events.</span>";});}\nwindow.refreshEvents=fetchEvents;fetchEvents();\n})();'
+        _events_js = (_events_js_tpl
+            .replace('__SID__', str(s_id))
+            .replace('__TSTART__', _json.dumps(str(s_start or '')))
+            .replace('__TEND__', _t_end_js)
+        )
+        _events_html_tpl = '<div class="mt-4"><div class="fw-semibold small mb-1">Events <span class="text-muted fw-normal">(logs StreamHub)</span></div><div id="eventsTimeline" style="min-height:44px;border:1px solid #dee2e6;border-radius:4px;padding:4px 8px;"><span class="text-muted small">Chargement…</span></div><div id="eventsListWrap" class="mt-2" style="display:none;"><table class="table table-sm table-hover mb-0" style="font-size:0.78rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;border:1px solid #dee2e6;border-radius:4px;"><thead class="table-light"><tr><th style="width:160px">Timestamp</th><th style="width:70px">Level</th><th>Message</th></tr></thead><tbody id="eventsList"></tbody></table></div></div>'
+        _events_timeline_html = _events_html_tpl + '<script>' + _events_js + '</script>'
 
         esc_page = esc(page_title)
         esc_start = esc(_fmt_ts(s_start))
@@ -2028,12 +2244,11 @@ async function repoll(){
               if (on) {
                 pollTimer = setInterval(async function(){
                   try {
-                    // Re-poll session samples
                     await repoll();
-                    // Also ping /data to drive backend LOGGER.observe_payload
                     if (deviceRowId !== null && deviceRowId !== 'null') {
                       fetch('/data?id=' + deviceRowId).catch(()=>{});
                     }
+                    if (window.refreshEvents) window.refreshEvents();
                   } catch(e){}
                 }, 4000);
               }
@@ -2125,11 +2340,12 @@ async function repoll(){
             return b'{"ok":false,"error":"bad session_id"}'
         with connect_db() as c:
             s = c.execute(
-                "SELECT device_host, started_at, ended_at FROM live_session WHERE id=?", (sid,)
+                "SELECT device_host, started_at, ended_at, input_index, input_identifier "
+                "FROM live_session WHERE id=?", (sid,)
             ).fetchone()
             if not s:
                 return b'{"ok":false,"error":"session_not_found"}'
-            host, started_at, ended_at = s
+            host, started_at, ended_at, input_index, input_identifier = s
             ts_start_cmp = started_at[:19].replace('T', ' ')
             ts_end_cmp   = (ended_at[:19].replace('T', ' ') if ended_at else _dt2.utcnow().strftime('%Y-%m-%d %H:%M:%S'))
             rows = c.execute(
@@ -2137,6 +2353,7 @@ async function repoll(){
                 "WHERE device_host=? AND ts >= ? AND ts <= ? ORDER BY ts ASC",
                 (host, ts_start_cmp, ts_end_cmp)
             ).fetchall()
+        rows = _filter_logs_for_input(rows, input_index, input_identifier)
         events = [{"ts": r[0], "node": r[1], "level": r[2], "message": r[3]} for r in rows]
         return json.dumps({"ok": True, "events": events}).encode("utf-8")
 
@@ -2186,11 +2403,12 @@ async function repoll(){
 
             ts_start_cmp = s[7][:19].replace('T', ' ') if s[7] else ''
             ts_end_cmp   = s[8][:19].replace('T', ' ') if s[8] else ''
-            ev_rows = c.execute(
+            _ev_raw = c.execute(
                 "SELECT ts, level, message FROM streamhub_log "
                 "WHERE device_host=? AND ts >= ? AND ts <= ? ORDER BY ts ASC",
                 (s[2], ts_start_cmp, ts_end_cmp)
             ).fetchall() if ts_start_cmp else []
+            ev_rows = _filter_logs_for_input(_ev_raw, s[4], s[5])
 
             dev_name = c.execute(
                 "SELECT name FROM devices WHERE host=? LIMIT 1", (s[2],)
@@ -2426,6 +2644,209 @@ async function repoll(){
             f'attachment; filename={pdf_filename}'
         )
         return pdf_bytes
+
+    @require_login
+    @cherrypy.expose
+    def settings(self, msg=None):
+        import json as _j, html as _h
+        with connect_db() as c:
+            sc = c.execute("SELECT webhook_url,channel,username FROM slack_config WHERE id=1").fetchone()
+            devs = c.execute("SELECT id,name,host FROM devices ORDER BY id ASC").fetchall()
+            ds_map = {}
+            for d in devs:
+                c.execute("INSERT OR IGNORE INTO device_slack(device_id) VALUES(?)", (d[0],))
+                _SCOLS = ('device_id,notify_session,notify_drops,notify_owd_threshold,'
+                          'notify_bitrate_min,notify_poller_error,notify_logs,notify_paused,ignore_contains')
+                r = c.execute('SELECT ' + _SCOLS + ' FROM device_slack WHERE device_id=?', (d[0],)).fetchone()
+                if r:
+                    ds_map[d[0]] = dict(zip(_SCOLS.split(','), r))
+
+        def esc(x): return _h.escape('' if x is None else str(x))
+        def chk(v): return 'checked' if v else ''
+
+        webhook  = sc[0] if sc else ''
+        channel  = sc[1] if sc else '#streampilot'
+        username = sc[2] if sc else 'StreamPilot'
+
+        dev_html = ''
+        for did, dname, dhost in devs:
+            ds = ds_map.get(did, {})
+            paused = bool(ds.get('notify_paused'))
+            try:
+                ignore_txt = '\n'.join(_j.loads(ds.get('ignore_contains') or '[]'))
+            except Exception:
+                ignore_txt = ''
+            badge = '<span class="badge text-bg-danger ms-2">Notifications OFF</span>' if paused else '<span class="badge text-bg-success ms-2">Notifications ON</span>'
+            pause_btn = (
+                f'''<form class="d-inline ms-2" method="post" action="/settings_device_resume">
+                  <input type="hidden" name="device_id" value="{did}">
+                  <button class="btn btn-sm btn-success" type="submit">Resume notifications</button>
+                </form>'''
+                if paused else
+                f'''<form class="d-inline ms-2" method="post" action="/settings_device_pause">
+                  <input type="hidden" name="device_id" value="{did}">
+                  <button class="btn btn-sm btn-danger" type="submit">Stop notifications</button>
+                </form>'''
+            )
+            dev_html += f'''
+            <div class="card mb-3">
+              <div class="card-header d-flex align-items-center">
+                <strong>{esc(dname)}</strong>
+                <span class="text-muted fw-normal small ms-2">({esc(dhost)})</span>
+                {badge}
+                {pause_btn}
+              </div>
+              <div class="card-body">
+                <form method="post" action="/settings_device_save">
+                  <input type="hidden" name="device_id" value="{did}">
+                  <div class="row g-2 mb-2">
+                    <div class="col-auto"><div class="form-check">
+                      <input class="form-check-input" type="checkbox" name="notify_session" id="ns_{did}" {chk(ds.get("notify_session",1))}>
+                      <label class="form-check-label" for="ns_{did}">Session start/stop</label>
+                    </div></div>
+                    <div class="col-auto"><div class="form-check">
+                      <input class="form-check-input" type="checkbox" name="notify_drops" id="nd_{did}" {chk(ds.get("notify_drops",1))}>
+                      <label class="form-check-label" for="nd_{did}">Dropped packets</label>
+                    </div></div>
+                    <div class="col-auto"><div class="form-check">
+                      <input class="form-check-input" type="checkbox" name="notify_poller_error" id="np_{did}" {chk(ds.get("notify_poller_error",1))}>
+                      <label class="form-check-label" for="np_{did}">Poller error</label>
+                    </div></div>
+                    <div class="col-auto"><div class="form-check">
+                      <input class="form-check-input" type="checkbox" name="notify_logs" id="nl_{did}" {chk(ds.get("notify_logs",1))}>
+                      <label class="form-check-label" for="nl_{did}">Forward all logs</label>
+                    </div></div>
+                  </div>
+                  <div class="row g-2 mb-2">
+                    <div class="col-md-4">
+                      <label class="form-label small">OWD alert threshold (ms, 0=off)</label>
+                      <input class="form-control form-control-sm" type="number" name="notify_owd_threshold" min="0" value="{esc(ds.get('notify_owd_threshold') or 0)}">
+                    </div>
+                    <div class="col-md-4">
+                      <label class="form-label small">Bitrate min alert (kb/s, 0=off)</label>
+                      <input class="form-control form-control-sm" type="number" name="notify_bitrate_min" min="0" value="{esc(ds.get('notify_bitrate_min') or 0)}">
+                    </div>
+                  </div>
+                  <div class="mb-2">
+                    <label class="form-label small">Ignore contains (one filter per line)</label>
+                    <textarea class="form-control form-control-sm" name="ignore_contains" rows="4" style="font-family:monospace;font-size:0.78rem">{esc(ignore_txt)}</textarea>
+                  </div>
+                  <button class="btn btn-sm btn-primary" type="submit">Save</button>
+                </form>
+              </div>
+            </div>'''
+
+        msg_html = f'<div class="alert alert-success">{esc(msg)}</div>' if msg else ''
+        body = f'''<!doctype html><html><head>
+          <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+          <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+          <title>Settings — StreamPilot</title>
+        </head><body class="p-3">
+          <div class="d-flex justify-content-between align-items-center mb-3">
+            <h1 class="h4 m-0">Settings</h1>
+            <a class="btn btn-outline-secondary" href="/">← Dashboard</a>
+          </div>
+          {msg_html}
+          <h2 class="h5 mb-3">Slack notifications</h2>
+          <div class="card mb-4">
+            <div class="card-header fw-semibold">Global configuration</div>
+            <div class="card-body">
+              <form method="post" action="/settings_slack_save">
+                <div class="row g-3">
+                  <div class="col-md-6">
+                    <label class="form-label">Webhook URL</label>
+                    <input class="form-control" name="webhook_url" type="url"
+                           placeholder="https://hooks.slack.com/services/..." value="{esc(webhook)}">
+                  </div>
+                  <div class="col-md-3">
+                    <label class="form-label">Channel</label>
+                    <input class="form-control" name="channel" placeholder="#streampilot" value="{esc(channel)}">
+                  </div>
+                  <div class="col-md-3">
+                    <label class="form-label">Username</label>
+                    <input class="form-control" name="username" placeholder="StreamPilot" value="{esc(username)}">
+                  </div>
+                </div>
+                <div class="mt-3 d-flex gap-2">
+                  <button class="btn btn-primary" type="submit">Save</button>
+                  <a class="btn btn-outline-secondary" href="/settings_slack_test">Send test notification</a>
+                </div>
+              </form>
+            </div>
+          </div>
+          <h2 class="h5 mb-3">Per-device settings</h2>
+          {dev_html or '<div class="text-muted">No devices configured.</div>'}
+        </body></html>'''
+        cherrypy.response.headers['Content-Type'] = 'text/html; charset=utf-8'
+        return body.encode('utf-8')
+
+    @require_login
+    @cherrypy.expose
+    def settings_slack_save(self, webhook_url='', channel='#streampilot', username='StreamPilot'):
+        with connect_db() as c:
+            c.execute("UPDATE slack_config SET webhook_url=?,channel=?,username=? WHERE id=1",
+                      (webhook_url.strip(), channel.strip() or '#streampilot', username.strip() or 'StreamPilot'))
+        raise cherrypy.HTTPRedirect("/settings?msg=Slack+config+saved")
+
+    @require_login
+    @cherrypy.expose
+    def settings_slack_test(self):
+        cfg = POLLER._load_slack_cfg() if POLLER else None
+        if not cfg:
+            raise cherrypy.HTTPRedirect("/settings?msg=No+webhook+configured")
+        POLLER._slack_post(cfg[0], ':wave: *StreamPilot* — Hello World! Test notification.', cfg[1], cfg[2], color='#439FE0')
+        raise cherrypy.HTTPRedirect("/settings?msg=Test+notification+sent")
+
+    @require_login
+    @cherrypy.expose
+    def settings_device_save(self, device_id=None, notify_session=None, notify_drops=None,
+                              notify_owd_threshold='0', notify_bitrate_min='0',
+                              notify_poller_error=None, notify_logs=None, ignore_contains=''):
+        import json as _j
+        if not device_id:
+            raise cherrypy.HTTPRedirect("/settings")
+        try: did = int(device_id)
+        except Exception: raise cherrypy.HTTPRedirect("/settings")
+        ns  = 1 if notify_session      else 0
+        nd  = 1 if notify_drops        else 0
+        npe = 1 if notify_poller_error else 0
+        nl  = 1 if notify_logs         else 0
+        try: owd = max(0, int(notify_owd_threshold or 0))
+        except: owd = 0
+        try: rbm = max(0, int(notify_bitrate_min or 0))
+        except: rbm = 0
+        lines = [l.strip() for l in (ignore_contains or '').splitlines() if l.strip()]
+        ign = _j.dumps(lines, ensure_ascii=False)
+        with connect_db() as c:
+            c.execute("INSERT OR IGNORE INTO device_slack(device_id) VALUES(?)", (did,))
+            c.execute("UPDATE device_slack SET notify_session=?,notify_drops=?,"
+                      "notify_owd_threshold=?,notify_bitrate_min=?,"
+                      "notify_poller_error=?,notify_logs=?,ignore_contains=? WHERE device_id=?",
+                      (ns, nd, owd, rbm, npe, nl, ign, did))
+        raise cherrypy.HTTPRedirect("/settings?msg=Device+settings+saved")
+
+    @require_login
+    @cherrypy.expose
+    def settings_device_pause(self, device_id=None):
+        if not device_id: raise cherrypy.HTTPRedirect("/settings")
+        try: did = int(device_id)
+        except Exception: raise cherrypy.HTTPRedirect("/settings")
+        with connect_db() as c:
+            c.execute("INSERT OR IGNORE INTO device_slack(device_id) VALUES(?)", (did,))
+            c.execute("UPDATE device_slack SET notify_paused=1 WHERE device_id=?", (did,))
+        raise cherrypy.HTTPRedirect("/settings?msg=Notifications+paused")
+
+    @require_login
+    @cherrypy.expose
+    def settings_device_resume(self, device_id=None):
+        if not device_id: raise cherrypy.HTTPRedirect("/settings")
+        try: did = int(device_id)
+        except Exception: raise cherrypy.HTTPRedirect("/settings")
+        with connect_db() as c:
+            c.execute("INSERT OR IGNORE INTO device_slack(device_id) VALUES(?)", (did,))
+            c.execute("UPDATE device_slack SET notify_paused=0 WHERE device_id=?", (did,))
+        raise cherrypy.HTTPRedirect("/settings?msg=Notifications+resumed")
+
 
 def run():
     port = int(os.getenv("StreamPilot", "5555"))

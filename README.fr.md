@@ -25,7 +25,7 @@ Les séries AIRxxx et PROxxx sont celles disposant d'un capteur GPS.
 ### Roadmap:
 
 - [x] Haivision SST transmitters
-- [ ] Notifications slack
+- [x] Notifications slack
 - [ ] Pilotage des priorités et des modems (besoin de plus de contrôle via l'API)
 
 ---
@@ -114,6 +114,10 @@ Les sessions sont accessibles via le menu **Logs**. En cliquant sur le bouton **
 
 Tant que le transmetteur est en **live**, les graphiques et la timeline vont progresser. En décochant **Follow live** vous pouvez bouger la timeline afin de visualiser un moment précis (GPS + INTERAFACES). 
 
+### Slack notifications:
+
+Suivez les instructions via ce lien [https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/), dans le menu **Settings** configurez les détails concernant le webhook puis pour chaque StreamHub les détails cocnernant chaque type de notifications.
+
 ---
 
 ## Fonctionnalités:
@@ -133,7 +137,8 @@ Tant que le transmetteur est en **live**, les graphiques et la timeline vont pro
 - **Follow live** pour voir l’actualisation en direct des sessions.  
 - **Background poller** indépendant de l’UI, qui capture les sessions même si le Dashboard n’est pas ouvert.  
 - **Thème clair/sombre** via toggle.  
-- **Dashboard responsive** (Bootstrap 5).  
+- **Dashboard responsive** (Bootstrap 5).
+- **Notifications slack** via webhook
 
 ---
 
