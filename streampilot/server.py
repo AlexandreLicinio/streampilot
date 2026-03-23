@@ -107,6 +107,14 @@ class BackgroundPoller:
                                 or str(did)
                             device_host = host
                             LOGGER.observe_payload(device_id, device_host, payload)
+                            # Fetch and persist StreamHub logs (plain text /logs endpoint)
+                            try:
+                                from collect.scripts.streamhub import fetch_logs_structured
+                                ok_logs, log_entries = fetch_logs_structured(base, token or None, timeout=5)
+                                if ok_logs and log_entries:
+                                    _persist_logs(host, log_entries)
+                            except Exception as _log_err:
+                                cherrypy.log(f"[poller] logs persist error: {_log_err}")
                         except Exception as obs_err:
                             cherrypy.log(f"[poller] observe_payload error: {obs_err}")
                         # Update age history for this host (based on last sample ts in DB)
@@ -180,7 +188,45 @@ def connect_db():
         " name TEXT, protocol TEXT, host TEXT, port INTEGER, api_path TEXT, token TEXT)"
     )
     _ensure_db_indexes(conn)
+    
+    # Table logs StreamHub
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS streamhub_log (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_host TEXT NOT NULL,
+            ts      TEXT,
+            node    TEXT,
+            level   TEXT,
+            message TEXT,
+            raw     TEXT,
+            fp      TEXT
+        )
+    """)
+    try:
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_shlog_fp ON streamhub_log(fp)")
+    except Exception: pass
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_shlog_host_ts ON streamhub_log(device_host, ts)")
+    except Exception: pass
+    
     return conn
+
+def _persist_logs(host: str, entries: list):
+    if not entries:
+        return
+    with connect_db() as c:
+        for e in entries:
+            fp = e.get("fp")
+            if not fp:
+                continue
+            try:
+                c.execute(
+                    "INSERT OR IGNORE INTO streamhub_log"
+                    "(device_host, ts, node, level, message, raw, fp) VALUES(?,?,?,?,?,?,?)",
+                    (host, e.get("ts"), e.get("node"), e.get("level"), e.get("message"), e.get("raw"), fp)
+                )
+            except Exception:
+                pass
 
 def render(tpl, **ctx):
     client, status = _get_client_status()
@@ -838,6 +884,21 @@ class App:
                 "rx_lost_nb_packets": rx_lost_nb_packets,
             })
         payload["samples"] = [by_ts[k] for k in sorted(by_ts.keys())]
+        # Include StreamHub log events for this session's time window
+        try:
+            ts_start_cmp = s[7][:19].replace('T', ' ') if s[7] else ''
+            ts_end_cmp   = s[8][:19].replace('T', ' ') if s[8] else ''
+            with connect_db() as c2:
+                ev_rows = c2.execute(
+                    "SELECT ts, node, level, message FROM streamhub_log "
+                    "WHERE device_host=? AND ts >= ?" +
+                    (" AND ts <= ?" if ts_end_cmp else "") +
+                    " ORDER BY ts ASC",
+                    (s[2], ts_start_cmp) + ((ts_end_cmp,) if ts_end_cmp else ())
+                ).fetchall() if ts_start_cmp else []
+            payload["events"] = [{"ts": r[0], "node": r[1], "level": r[2], "message": r[3]} for r in ev_rows]
+        except Exception:
+            payload["events"] = []
         data = json.dumps(payload, ensure_ascii=False, separators=(',',':'))
         cherrypy.response.headers['Content-Disposition'] = f'attachment; filename=session_{sid}.json'
         return data.encode("utf-8")
@@ -1246,6 +1307,105 @@ class App:
 
         page_title = f"Session #{s_id} — {s_title or (s_disp or s_dev) or ''}"
 
+        import json as _json
+        _t_end_js = ("new Date(" + _json.dumps(str(s_end)) + ").getTime()") if s_end else "Date.now()"
+        _events_timeline_html = (
+            '<div class="mt-4">'
+            '<div class="fw-semibold small mb-1">Events <span class="text-muted fw-normal">(logs StreamHub)</span></div>'
+            '<div id="eventsTimeline" style="min-height:44px;border:1px solid #dee2e6;border-radius:4px;padding:4px 8px;">'
+            '<span class="text-muted small">Chargement\u2026</span>'
+            '</div>'
+            '<div id="eventsListWrap" class="mt-2" style="display:none;">'
+            '<table class="table table-sm table-hover mb-0" style="font-size:0.78rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;border:1px solid #dee2e6;border-radius:4px;">'
+            '<thead class="table-light">'
+            '<tr><th style="width:160px">Timestamp</th><th style="width:70px">Level</th><th>Message</th></tr>'
+            '</thead>'
+            '<tbody id="eventsList"></tbody>'
+            '</table></div></div>'
+            '<script>(function(){'
+            'var SESSION_ID=' + str(s_id) + ';'
+            'var T_START=new Date(' + _json.dumps(str(s_start or '')) + ').getTime();'
+            'var T_END=' + _t_end_js + ';'
+            'var NL=String.fromCharCode(10);'
+            'var LEVEL_COLOR={ERROR:"#dc3545",WARNING:"#fd7e14",WARN:"#fd7e14",INFO:"#0d6efd",DEBUG:"#6c757d"};'
+            'var LEVEL_BADGE={'
+            'ERROR:"<span class=\'badge\' style=\'background:#dc3545\'>ERROR</span>",'
+            'WARNING:"<span class=\'badge\' style=\'background:#fd7e14\'>WARN</span>",'
+            'WARN:"<span class=\'badge\' style=\'background:#fd7e14\'>WARN</span>",'
+            'INFO:"<span class=\'badge\' style=\'background:#0d6efd\'>INFO</span>",'
+            'DEBUG:"<span class=\'badge\' style=\'background:#6c757d\'>DEBUG</span>"'
+            '};'
+            'var tip=document.createElement("div");'
+            'tip.style.cssText="position:fixed;background:#212529;color:#fff;padding:5px 10px;border-radius:5px;font-size:11px;pointer-events:none;display:none;max-width:480px;z-index:9999;white-space:pre-wrap;";'
+            'document.body.appendChild(tip);'
+            'function renderEvents(evs){'
+            'var el=document.getElementById("eventsTimeline");'
+            'var listWrap=document.getElementById("eventsListWrap");'
+            'var tbody=document.getElementById("eventsList");'
+            'if(!evs||!evs.length){'
+            'el.innerHTML="<span class=\'text-muted small\'>Aucun event trouv\xe9 pour cette session.</span>";'
+            'listWrap.style.display="none";return;}'
+            'var W=1000,H=44,cy=H/2;'
+            'var tEnd=T_END;if(tEnd<=T_START)tEnd=T_START+1;'
+            'var dur=tEnd-T_START||1;'
+            'var svg="<svg width=\'100%\' height=\'"+H+"\' viewBox=\'0 0 "+W+" "+H+"\' xmlns=\'http://www.w3.org/2000/svg\' style=\'display:block\'>";'
+            'svg+="<rect x=\'0\' y=\'"+(cy-2)+"\' width=\'"+W+"\' height=\'4\' fill=\'#dee2e6\' rx=\'2\'/>";'
+            'evs.forEach(function(ev,i){'
+            'var t=new Date(ev.ts).getTime();'
+            'var x=Math.max(6,Math.min(W-6,Math.round((t-T_START)/dur*W)));'
+            'var col=LEVEL_COLOR[ev.level]||"#0d6efd";'
+            'var msg=(ev.message||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/"/g,"&quot;");'
+            'svg+="<line x1=\'"+x+"\' y1=\'4\' x2=\'"+x+"\' y2=\'"+(H-4)+"\' stroke=\'"+col+"\' stroke-width=\'1.5\' opacity=\'0.4\'/>";'
+            'svg+="<circle cx=\'"+x+"\' cy=\'"+cy+"\' r=\'5\' fill=\'"+col+"\' data-idx=\'"+i+"\' data-ts=\'"+ev.ts+"\' data-lvl=\'"+(ev.level||"")+"\' data-msg=\'"+msg+"\' style=\'cursor:pointer\'/>";'
+            '});'
+            'svg+="</svg>";'
+            'el.innerHTML=svg;'
+            'var rows="";'
+            'evs.forEach(function(ev,i){'
+            'var badge=LEVEL_BADGE[ev.level]||LEVEL_BADGE["INFO"];'
+            'var msg=(ev.message||"").replace(/&/g,"&amp;").replace(/</g,"&lt;");'
+            'rows+="<tr data-idx=\'"+i+"\' style=\'cursor:pointer\'><td class=\'text-muted\'>"+ev.ts+"</td><td>"+badge+"</td><td>"+msg+"</td></tr>";'
+            '});'
+            'tbody.innerHTML=rows;'
+            'listWrap.style.display="block";'
+            'function highlightDot(idx,on){'
+            'var c=el.querySelector("circle[data-idx=\'"+idx+"\']");'
+            'if(!c)return;'
+            'c.setAttribute("r",on?"9":"5");'
+            'c.setAttribute("stroke",on?"#fff":"none");'
+            'c.setAttribute("stroke-width",on?"2":"0");}'
+            'function highlightRow(idx,on){'
+            'var tr=tbody.querySelector("tr[data-idx=\'"+idx+"\']");'
+            'if(!tr)return;'
+            'tr.style.background=on?"#e8f4fd":"";'
+            'if(on)tr.scrollIntoView({block:"nearest",behavior:"smooth"});}'
+            'tbody.querySelectorAll("tr").forEach(function(tr){'
+            'var idx=tr.dataset.idx;'
+            'tr.addEventListener("mouseenter",function(){highlightDot(idx,true);});'
+            'tr.addEventListener("mouseleave",function(){highlightDot(idx,false);});'
+            '});'
+            'el.querySelectorAll("circle").forEach(function(c){'
+            'c.addEventListener("mouseenter",function(){'
+            'highlightDot(c.dataset.idx,true);'
+            'highlightRow(c.dataset.idx,true);'
+            'tip.textContent=c.dataset.ts+"  ["+c.dataset.lvl+"]"+NL+c.dataset.msg;'
+            'tip.style.display="block";});'
+            'c.addEventListener("mousemove",function(e){tip.style.left=(e.clientX+14)+"px";tip.style.top=(e.clientY-10)+"px";});'
+            'c.addEventListener("mouseleave",function(){'
+            'highlightDot(c.dataset.idx,false);'
+            'highlightRow(c.dataset.idx,false);'
+            'tip.style.display="none";});'
+            '});}'
+            'function fetchEvents(){'
+            'fetch("/session_events?session_id="+SESSION_ID)'
+            '.then(function(r){return r.json();})'
+            '.then(function(data){renderEvents(data.ok?data.events:[]);})'
+            '.catch(function(){document.getElementById("eventsTimeline").innerHTML="<span class=\'text-muted small\'>Erreur chargement events.</span>";});}'
+            'window.refreshEvents=fetchEvents;'
+            'fetchEvents();'
+            '})();</script>'
+        )
+
         esc_page = esc(page_title)
         esc_start = esc(_fmt_ts(s_start))
         esc_end = (esc(_fmt_ts(s_end)) if s_end else 'live')
@@ -1358,6 +1518,8 @@ class App:
                 </div>
               </div>
             </div>
+
+            """ + _events_timeline_html + """
 
             <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
             <script>
@@ -1935,6 +2097,8 @@ async function repoll(){
                     if (deviceRowId !== null && deviceRowId !== 'null') {
                       fetch('/data?id=' + deviceRowId).catch(()=>{});
                     }
+                    // Refresh events timeline
+                    if (window.refreshEvents) window.refreshEvents();
                   } catch(e){}
                 }, 4000);
               }
@@ -2011,6 +2175,35 @@ async function repoll(){
         with connect_db() as c:
             c.execute("UPDATE live_session SET title=? WHERE id=?", (title if title else None, sid))
         raise cherrypy.HTTPRedirect("/logs_ui?msg=Title%20saved")
+    
+    @require_login
+    @cherrypy.expose
+    def session_events(self, session_id=None):
+        import json
+        from datetime import datetime as _dt2
+        cherrypy.response.headers["Content-Type"] = "application/json; charset=utf-8"
+        if not session_id:
+            return b'{"ok":false,"error":"missing session_id"}'
+        try:
+            sid = int(session_id)
+        except Exception:
+            return b'{"ok":false,"error":"bad session_id"}'
+        with connect_db() as c:
+            s = c.execute(
+                "SELECT device_host, started_at, ended_at FROM live_session WHERE id=?", (sid,)
+            ).fetchone()
+            if not s:
+                return b'{"ok":false,"error":"session_not_found"}'
+            host, started_at, ended_at = s
+            ts_start_cmp = started_at[:19].replace('T', ' ')
+            ts_end_cmp   = (ended_at[:19].replace('T', ' ') if ended_at else _dt2.utcnow().strftime('%Y-%m-%d %H:%M:%S'))
+            rows = c.execute(
+                "SELECT ts, node, level, message FROM streamhub_log "
+                "WHERE device_host=? AND ts >= ? AND ts <= ? ORDER BY ts ASC",
+                (host, ts_start_cmp, ts_end_cmp)
+            ).fetchall()
+        events = [{"ts": r[0], "node": r[1], "level": r[2], "message": r[3]} for r in rows]
+        return json.dumps({"ok": True, "events": events}).encode("utf-8")
         
 def run():
     port = int(os.getenv("StreamPilot", "5555"))

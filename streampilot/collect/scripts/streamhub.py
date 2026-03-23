@@ -453,3 +453,54 @@ def fetch_streamhub(base_url: str, token: str | None = None, timeout: int = 5) -
     payload["inputs"].update(counters)
 
     return True, payload
+
+# --- Structured log fetching
+
+import hashlib as _hashlib
+
+_LOG_RE = re.compile(
+    r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+"
+    r"(?P<node>\S+)\s+"
+    r"(?P<app>[^:]+):\s+"
+    r"(?P<level>[A-Z]+):\s+"
+    r"(?P<msg>.*)$"
+)
+
+def _log_fp(raw: str) -> str:
+    return _hashlib.sha1(raw.encode("utf-8", errors="replace")).hexdigest()
+
+def _parse_log_line(raw: str) -> Dict[str, Any]:
+    raw = raw.rstrip()
+    m = _LOG_RE.match(raw)
+    if not m:
+        return {"ts": None, "node": None, "level": "INFO", "message": raw, "raw": raw, "fp": _log_fp(raw)}
+    return {
+        "ts": m.group("ts"),
+        "node": m.group("node"),
+        "level": m.group("level"),
+        "message": m.group("msg"),
+        "raw": raw,
+        "fp": _log_fp(raw),
+    }
+
+def fetch_logs_structured(base_url: str, token: str | None = None, timeout: int = 5) -> Tuple[bool, list]:
+    """Fetch /logs (plain text) and return (ok, list[dict]) with parsed fields."""
+    if not token:
+        return False, []
+    url = _full_url(base_url, "/logs", token)
+    try:
+        r = _HTTP.get(
+            url,
+            headers={"Accept": "text/plain"},
+            timeout=(2, timeout),
+            verify=False,
+            allow_redirects=False,
+        )
+        if r.status_code != 200:
+            return False, []
+        lines = [l for l in r.text.splitlines() if l.strip()]
+        if not lines:
+            return False, []
+        return True, [_parse_log_line(l) for l in lines]
+    except Exception:
+        return False, []
