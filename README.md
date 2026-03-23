@@ -50,7 +50,7 @@ python3 -m venv --system-site-packages .
 2. Install the main dependencies:
 
 ```bash
-bin/python -m pip install CherryPy Mako requests
+bin/python -m pip install CherryPy Mako requests reportlab
 ```
 
 ---
@@ -123,6 +123,7 @@ While the transmitter is **live**, charts and timeline progress continuously. If
 - **JSON/CSV export** of sessions with all measurements (GPS, links, drops…)
 - **JSON import** of sessions with full measurements (GPS, links, drops…)
 - **GeoJSON export** for external analysis (QGIS, Kepler.gl, geojson.io…)
+- **PDF export** for reports and reviews.
 - **GPS sessions** with individual deletion or full purge
 - **Health view** (`/health`) with poller state, active sessions, last sample age per StreamHub
 - **Sparklines** (mini SVG charts over 1–2 minutes) for last‑sample age

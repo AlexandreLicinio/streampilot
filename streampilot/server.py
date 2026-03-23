@@ -884,21 +884,6 @@ class App:
                 "rx_lost_nb_packets": rx_lost_nb_packets,
             })
         payload["samples"] = [by_ts[k] for k in sorted(by_ts.keys())]
-        # Include StreamHub log events for this session's time window
-        try:
-            ts_start_cmp = s[7][:19].replace('T', ' ') if s[7] else ''
-            ts_end_cmp   = s[8][:19].replace('T', ' ') if s[8] else ''
-            with connect_db() as c2:
-                ev_rows = c2.execute(
-                    "SELECT ts, node, level, message FROM streamhub_log "
-                    "WHERE device_host=? AND ts >= ?" +
-                    (" AND ts <= ?" if ts_end_cmp else "") +
-                    " ORDER BY ts ASC",
-                    (s[2], ts_start_cmp) + ((ts_end_cmp,) if ts_end_cmp else ())
-                ).fetchall() if ts_start_cmp else []
-            payload["events"] = [{"ts": r[0], "node": r[1], "level": r[2], "message": r[3]} for r in ev_rows]
-        except Exception:
-            payload["events"] = []
         data = json.dumps(payload, ensure_ascii=False, separators=(',',':'))
         cherrypy.response.headers['Content-Disposition'] = f'attachment; filename=session_{sid}.json'
         return data.encode("utf-8")
@@ -1018,6 +1003,7 @@ class App:
                 <a class="btn btn-sm btn-outline-primary" href="/log_download?session_id={sid}" download="session_{sid}.json">JSON</a>
                 <a class="btn btn-sm btn-outline-secondary ms-1" href="/log_download_csv?session_id={sid}">CSV</a>
                 <a class="btn btn-sm btn-outline-success ms-1" href="/log_download_geojson?session_id={sid}">GeoJSON</a>
+                {'<a class="btn btn-sm btn-outline-danger ms-1" href="/log_pdf?session_id='+str(sid)+'">PDF</a>' if end else ''}
                 <a class="btn btn-sm btn-outline-dark ms-1" href="/log_view?session_id={sid}">View</a>
                 {stop_btn}
                 <form class="d-inline ms-1" method="post" action="/log_delete" onsubmit="return confirm('Delete this session?');">
@@ -1309,102 +1295,53 @@ class App:
 
         import json as _json
         _t_end_js = ("new Date(" + _json.dumps(str(s_end)) + ").getTime()") if s_end else "Date.now()"
-        _events_timeline_html = (
-            '<div class="mt-4">'
-            '<div class="fw-semibold small mb-1">Events <span class="text-muted fw-normal">(logs StreamHub)</span></div>'
-            '<div id="eventsTimeline" style="min-height:44px;border:1px solid #dee2e6;border-radius:4px;padding:4px 8px;">'
-            '<span class="text-muted small">Chargement\u2026</span>'
-            '</div>'
-            '<div id="eventsListWrap" class="mt-2" style="display:none;">'
-            '<table class="table table-sm table-hover mb-0" style="font-size:0.78rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;border:1px solid #dee2e6;border-radius:4px;">'
-            '<thead class="table-light">'
-            '<tr><th style="width:160px">Timestamp</th><th style="width:70px">Level</th><th>Message</th></tr>'
-            '</thead>'
-            '<tbody id="eventsList"></tbody>'
-            '</table></div></div>'
-            '<script>(function(){'
-            'var SESSION_ID=' + str(s_id) + ';'
-            'var T_START=new Date(' + _json.dumps(str(s_start or '')) + ').getTime();'
-            'var T_END=' + _t_end_js + ';'
-            'var NL=String.fromCharCode(10);'
-            'var LEVEL_COLOR={ERROR:"#dc3545",WARNING:"#fd7e14",WARN:"#fd7e14",INFO:"#0d6efd",DEBUG:"#6c757d"};'
-            'var LEVEL_BADGE={'
-            'ERROR:"<span class=\'badge\' style=\'background:#dc3545\'>ERROR</span>",'
-            'WARNING:"<span class=\'badge\' style=\'background:#fd7e14\'>WARN</span>",'
-            'WARN:"<span class=\'badge\' style=\'background:#fd7e14\'>WARN</span>",'
-            'INFO:"<span class=\'badge\' style=\'background:#0d6efd\'>INFO</span>",'
-            'DEBUG:"<span class=\'badge\' style=\'background:#6c757d\'>DEBUG</span>"'
-            '};'
-            'var tip=document.createElement("div");'
-            'tip.style.cssText="position:fixed;background:#212529;color:#fff;padding:5px 10px;border-radius:5px;font-size:11px;pointer-events:none;display:none;max-width:480px;z-index:9999;white-space:pre-wrap;";'
-            'document.body.appendChild(tip);'
-            'function renderEvents(evs){'
-            'var el=document.getElementById("eventsTimeline");'
-            'var listWrap=document.getElementById("eventsListWrap");'
-            'var tbody=document.getElementById("eventsList");'
-            'if(!evs||!evs.length){'
-            'el.innerHTML="<span class=\'text-muted small\'>Aucun event trouv\xe9 pour cette session.</span>";'
-            'listWrap.style.display="none";return;}'
-            'var W=1000,H=44,cy=H/2;'
-            'var tEnd=T_END;if(tEnd<=T_START)tEnd=T_START+1;'
-            'var dur=tEnd-T_START||1;'
-            'var svg="<svg width=\'100%\' height=\'"+H+"\' viewBox=\'0 0 "+W+" "+H+"\' xmlns=\'http://www.w3.org/2000/svg\' style=\'display:block\'>";'
-            'svg+="<rect x=\'0\' y=\'"+(cy-2)+"\' width=\'"+W+"\' height=\'4\' fill=\'#dee2e6\' rx=\'2\'/>";'
-            'evs.forEach(function(ev,i){'
-            'var t=new Date(ev.ts).getTime();'
-            'var x=Math.max(6,Math.min(W-6,Math.round((t-T_START)/dur*W)));'
-            'var col=LEVEL_COLOR[ev.level]||"#0d6efd";'
-            'var msg=(ev.message||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/"/g,"&quot;");'
-            'svg+="<line x1=\'"+x+"\' y1=\'4\' x2=\'"+x+"\' y2=\'"+(H-4)+"\' stroke=\'"+col+"\' stroke-width=\'1.5\' opacity=\'0.4\'/>";'
-            'svg+="<circle cx=\'"+x+"\' cy=\'"+cy+"\' r=\'5\' fill=\'"+col+"\' data-idx=\'"+i+"\' data-ts=\'"+ev.ts+"\' data-lvl=\'"+(ev.level||"")+"\' data-msg=\'"+msg+"\' style=\'cursor:pointer\'/>";'
-            '});'
-            'svg+="</svg>";'
-            'el.innerHTML=svg;'
-            'var rows="";'
-            'evs.forEach(function(ev,i){'
-            'var badge=LEVEL_BADGE[ev.level]||LEVEL_BADGE["INFO"];'
-            'var msg=(ev.message||"").replace(/&/g,"&amp;").replace(/</g,"&lt;");'
-            'rows+="<tr data-idx=\'"+i+"\' style=\'cursor:pointer\'><td class=\'text-muted\'>"+ev.ts+"</td><td>"+badge+"</td><td>"+msg+"</td></tr>";'
-            '});'
-            'tbody.innerHTML=rows;'
-            'listWrap.style.display="block";'
-            'function highlightDot(idx,on){'
-            'var c=el.querySelector("circle[data-idx=\'"+idx+"\']");'
-            'if(!c)return;'
-            'c.setAttribute("r",on?"9":"5");'
-            'c.setAttribute("stroke",on?"#fff":"none");'
-            'c.setAttribute("stroke-width",on?"2":"0");}'
-            'function highlightRow(idx,on){'
-            'var tr=tbody.querySelector("tr[data-idx=\'"+idx+"\']");'
-            'if(!tr)return;'
-            'tr.style.background=on?"#e8f4fd":"";'
-            'if(on)tr.scrollIntoView({block:"nearest",behavior:"smooth"});}'
-            'tbody.querySelectorAll("tr").forEach(function(tr){'
-            'var idx=tr.dataset.idx;'
-            'tr.addEventListener("mouseenter",function(){highlightDot(idx,true);});'
-            'tr.addEventListener("mouseleave",function(){highlightDot(idx,false);});'
-            '});'
-            'el.querySelectorAll("circle").forEach(function(c){'
-            'c.addEventListener("mouseenter",function(){'
-            'highlightDot(c.dataset.idx,true);'
-            'highlightRow(c.dataset.idx,true);'
-            'tip.textContent=c.dataset.ts+"  ["+c.dataset.lvl+"]"+NL+c.dataset.msg;'
-            'tip.style.display="block";});'
-            'c.addEventListener("mousemove",function(e){tip.style.left=(e.clientX+14)+"px";tip.style.top=(e.clientY-10)+"px";});'
-            'c.addEventListener("mouseleave",function(){'
-            'highlightDot(c.dataset.idx,false);'
-            'highlightRow(c.dataset.idx,false);'
-            'tip.style.display="none";});'
-            '});}'
-            'function fetchEvents(){'
-            'fetch("/session_events?session_id="+SESSION_ID)'
-            '.then(function(r){return r.json();})'
-            '.then(function(data){renderEvents(data.ok?data.events:[]);})'
-            '.catch(function(){document.getElementById("eventsTimeline").innerHTML="<span class=\'text-muted small\'>Erreur chargement events.</span>";});}'
-            'window.refreshEvents=fetchEvents;'
-            'fetchEvents();'
-            '})();</script>'
-        )
+        _events_timeline_html = f"""<div class="mt-4">
+              <div class="fw-semibold small mb-1">Events <span class="text-muted fw-normal">(logs StreamHub)</span></div>
+              <div id="eventsTimeline" style="min-height:44px;border:1px solid #dee2e6;border-radius:4px;padding:4px 8px;">
+                <span class="text-muted small">Chargement\u2026</span>
+              </div>
+            </div>
+            <script>
+            (function(){{
+              var SESSION_ID={s_id};
+              var T_START=new Date({_json.dumps(str(s_start or ''))}).getTime();
+              var T_END={_t_end_js};
+              var LEVEL_COLOR={{ERROR:'#dc3545',WARNING:'#fd7e14',WARN:'#fd7e14',INFO:'#0d6efd',DEBUG:'#6c757d'}};
+              fetch('/session_events?session_id='+SESSION_ID)
+                .then(function(r){{return r.json();}})
+                .then(function(data){{
+                  var el=document.getElementById('eventsTimeline');
+                  if(!data.ok||!data.events||!data.events.length){{
+                    el.innerHTML='<span class="text-muted small">Aucun event trouv\xe9 pour cette session.</span>';
+                    return;
+                  }}
+                  var evs=data.events;
+                  var W=1000,H=44,cy=H/2;
+                  var svg='<svg width="100%" height="'+H+'" viewBox="0 0 '+W+' '+H+'" xmlns="http://www.w3.org/2000/svg" style="display:block">';
+                  svg+='<rect x="0" y="'+(cy-2)+'" width="'+W+'" height="4" fill="#dee2e6" rx="2"/>';
+                  var dur=T_END-T_START||1;
+                  evs.forEach(function(ev){{
+                    var t=new Date(ev.ts).getTime();
+                    var x=Math.max(6,Math.min(W-6,Math.round((t-T_START)/dur*W)));
+                    var col=LEVEL_COLOR[ev.level]||'#0d6efd';
+                    var msg=(ev.message||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+                    svg+='<line x1="'+x+'" y1="4" x2="'+x+'" y2="'+(H-4)+'" stroke="'+col+'" stroke-width="1.5" opacity="0.4"/>';
+                    svg+='<circle cx="'+x+'" cy="'+cy+'" r="5" fill="'+col+'" data-ts="'+ev.ts+'" data-lvl="'+(ev.level||'')+'" data-msg="'+msg+'" style="cursor:pointer"/>';
+                  }});
+                  svg+='</svg>';
+                  el.innerHTML=svg;
+                  var tip=document.createElement('div');
+                  tip.style.cssText='position:fixed;background:#212529;color:#fff;padding:5px 10px;border-radius:5px;font-size:11px;pointer-events:none;display:none;max-width:480px;z-index:9999;white-space:pre-wrap;';
+                  document.body.appendChild(tip);
+                  el.querySelectorAll('circle').forEach(function(c){{
+                    c.addEventListener('mouseenter',function(){{tip.textContent=c.dataset.ts+'  ['+c.dataset.lvl+']\n'+c.dataset.msg;tip.style.display='block';}});
+                    c.addEventListener('mousemove',function(e){{tip.style.left=(e.clientX+14)+'px';tip.style.top=(e.clientY-10)+'px';}});
+                    c.addEventListener('mouseleave',function(){{tip.style.display='none';}});
+                  }});
+                }})
+                .catch(function(){{document.getElementById('eventsTimeline').innerHTML='<span class="text-muted small">Erreur chargement events.</span>';}});
+            }})();
+            </script>"""
 
         esc_page = esc(page_title)
         esc_start = esc(_fmt_ts(s_start))
@@ -2097,8 +2034,6 @@ async function repoll(){
                     if (deviceRowId !== null && deviceRowId !== 'null') {
                       fetch('/data?id=' + deviceRowId).catch(()=>{});
                     }
-                    // Refresh events timeline
-                    if (window.refreshEvents) window.refreshEvents();
                   } catch(e){}
                 }, 4000);
               }
@@ -2204,7 +2139,294 @@ async function repoll(){
             ).fetchall()
         events = [{"ts": r[0], "node": r[1], "level": r[2], "message": r[3]} for r in rows]
         return json.dumps({"ok": True, "events": events}).encode("utf-8")
-        
+
+    @require_login
+    @cherrypy.expose
+    def log_pdf(self, session_id=None):
+        import io
+        from datetime import datetime
+        if not session_id:
+            raise cherrypy.HTTPRedirect("/logs_ui?msg=Missing%20session_id")
+        try:
+            sid = int(session_id)
+        except Exception:
+            raise cherrypy.HTTPRedirect("/logs_ui?msg=Bad%20session_id")
+
+        try:
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib import colors
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.lib.units import mm
+            from reportlab.platypus import (
+                SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+            )
+            from reportlab.graphics.shapes import Drawing, PolyLine, String, Line, Rect
+            from reportlab.graphics import renderPDF
+        except ImportError:
+            cherrypy.response.headers['Content-Type'] = 'text/plain; charset=utf-8'
+            return b'reportlab not installed. Run: pip install reportlab'
+
+        # ── Fetch data ──────────────────────────────────────────────────────
+        with connect_db() as c:
+            s = c.execute(
+                "SELECT id, device_id, device_host, input_key, input_index, "
+                "input_identifier, input_display_name, started_at, ended_at, title "
+                "FROM live_session WHERE id=?", (sid,)
+            ).fetchone()
+            if not s:
+                raise cherrypy.HTTPRedirect("/logs_ui?msg=Session%20not%20found")
+            if not s[8]:
+                raise cherrypy.HTTPRedirect("/logs_ui?msg=Session%20still%20live")
+
+            rows = c.execute(
+                "SELECT ts, link_name, owdR, rx_bitrate, rx_percent_lost, "
+                "rx_lost_nb_packets, drops_video, drops_ts "
+                "FROM live_sample WHERE session_id=? ORDER BY id ASC", (sid,)
+            ).fetchall()
+
+            ts_start_cmp = s[7][:19].replace('T', ' ') if s[7] else ''
+            ts_end_cmp   = s[8][:19].replace('T', ' ') if s[8] else ''
+            ev_rows = c.execute(
+                "SELECT ts, level, message FROM streamhub_log "
+                "WHERE device_host=? AND ts >= ? AND ts <= ? ORDER BY ts ASC",
+                (s[2], ts_start_cmp, ts_end_cmp)
+            ).fetchall() if ts_start_cmp else []
+
+            dev_name = c.execute(
+                "SELECT name FROM devices WHERE host=? LIMIT 1", (s[2],)
+            ).fetchone()
+
+            # First GPS fix for this session
+            gps_row = c.execute(
+                "SELECT latitude, longitude FROM live_sample "
+                "WHERE session_id=? AND latitude IS NOT NULL AND longitude IS NOT NULL "
+                "ORDER BY id ASC LIMIT 1", (sid,)
+            ).fetchone()
+            first_gps = (round(gps_row[0], 6), round(gps_row[1], 6)) if gps_row else None
+
+        # ── Compute per-link stats ───────────────────────────────────────────
+        from collections import defaultdict
+        link_stats = defaultdict(lambda: {
+            'rb': [], 'owd': [], 'loss': [], 'lost_pkts': 0
+        })
+        drops_video_max = 0
+        drops_ts_max = 0
+        bitrate_series = []   # (ts_str, total_rb) for chart
+
+        by_ts = {}
+        for r in rows:
+            ts, lname, owd, rb, rpl, rlnp, dv, dt = r
+            if ts not in by_ts:
+                by_ts[ts] = {'total_rb': 0, 'dv': dv or 0, 'dt': dt or 0}
+            if lname:
+                if rb is not None:
+                    link_stats[lname]['rb'].append(rb)
+                    by_ts[ts]['total_rb'] += rb
+                if owd is not None:
+                    link_stats[lname]['owd'].append(owd)
+                if rpl is not None:
+                    link_stats[lname]['loss'].append(rpl)
+                if rlnp:
+                    link_stats[lname]['lost_pkts'] += rlnp
+            if dv:
+                drops_video_max = max(drops_video_max, dv)
+            if dt:
+                drops_ts_max = max(drops_ts_max, dt)
+
+        for ts_key in sorted(by_ts.keys()):
+            bitrate_series.append((ts_key, by_ts[ts_key]['total_rb']))
+
+        def _avg(lst): return round(sum(lst)/len(lst), 1) if lst else 0
+        def _max(lst): return max(lst) if lst else 0
+        def _fmt_dur(secs):
+            secs = int(secs)
+            h, r = divmod(secs, 3600)
+            m, s2 = divmod(r, 60)
+            return f"{h:02d}:{m:02d}:{s2:02d}"
+        def _parse_dt(x):
+            try: return datetime.fromisoformat(str(x)[:19])
+            except: return None
+
+        started_dt = _parse_dt(s[7])
+        ended_dt   = _parse_dt(s[8])
+        duration   = _fmt_dur((ended_dt - started_dt).total_seconds()) if started_dt and ended_dt else "—"
+        generated  = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+        session_title = s[9] or ''
+        title_str  = session_title or s[6] or s[1] or f"Session #{sid}"
+        # Filename: include session title slug if set
+        import re as _re
+        title_slug = _re.sub(r'[^\w\-]', '_', session_title)[:40].strip('_') if session_title else ''
+        pdf_filename = f"session_{sid}{'_'+title_slug if title_slug else ''}_report.pdf"
+        sh_name    = dev_name[0] if dev_name else s[2]
+
+        # ── Build PDF ────────────────────────────────────────────────────────
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(
+            buf, pagesize=A4,
+            leftMargin=15*mm, rightMargin=15*mm,
+            topMargin=15*mm, bottomMargin=15*mm,
+            title=f"StreamPilot — {title_str}"
+        )
+        W_doc = A4[0] - 30*mm
+
+        styles = getSampleStyleSheet()
+        sN  = styles['Normal']
+        sH1 = ParagraphStyle('h1', parent=styles['Heading1'], fontSize=14, spaceAfter=4)
+        sH2 = ParagraphStyle('h2', parent=styles['Heading2'], fontSize=11, spaceAfter=3, spaceBefore=8)
+        sMono = ParagraphStyle('mono', parent=sN, fontName='Courier', fontSize=8)
+        sSmall = ParagraphStyle('small', parent=sN, fontSize=8, textColor=colors.grey)
+
+        COL_HDR = colors.HexColor('#1a3a5c')
+        COL_ROW = colors.HexColor('#f0f4f8')
+
+        story = []
+
+        # Header
+        story.append(Paragraph("StreamPilot — Session Report", sH1))
+        story.append(Paragraph(f"Generated {generated}", sSmall))
+        story.append(HRFlowable(width="100%", thickness=1, color=COL_HDR, spaceAfter=6))
+
+        # Session info table
+        info_data = [
+            ["Session", f"#{sid}  {title_str}"],
+            ["StreamHub", f"{sh_name}  ({s[2]})"],
+            ["Input", f"#{s[4]}  {s[5] or '—'}  {s[6] or ''}".strip()],
+            ["Started", s[7][:19].replace('T', ' ') if s[7] else '—'],
+            ["Ended",   s[8][:19].replace('T', ' ') if s[8] else '—'],
+            ["Duration", duration],
+            ["Dropped video / TS", f"{drops_video_max} / {drops_ts_max}"],
+        ]
+        if first_gps:
+            info_data.append(["First GPS fix", f"lat {first_gps[0]}  lng {first_gps[1]}"])
+        info_tbl = Table(info_data, colWidths=[35*mm, W_doc - 35*mm])
+        info_tbl.setStyle(TableStyle([
+            ('FONTNAME',  (0,0), (0,-1), 'Helvetica-Bold'),
+            ('FONTSIZE',  (0,0), (-1,-1), 9),
+            ('TEXTCOLOR', (0,0), (0,-1), COL_HDR),
+            ('ROWBACKGROUNDS', (0,0), (-1,-1), [colors.white, COL_ROW]),
+            ('GRID', (0,0), (-1,-1), 0.3, colors.HexColor('#c0ccd8')),
+            ('TOPPADDING', (0,0), (-1,-1), 3),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 3),
+        ]))
+        story.append(info_tbl)
+        story.append(Spacer(1, 8))
+
+        # Per-link stats table
+        if link_stats:
+            story.append(Paragraph("Link metrics", sH2))
+            tbl_data = [["Link", "Avg kb/s", "Max kb/s", "Avg OWD ms", "Max OWD ms", "Avg loss %", "Lost pkts"]]
+            for lname, ls in sorted(link_stats.items()):
+                tbl_data.append([
+                    lname,
+                    str(_avg(ls['rb'])),
+                    str(_max(ls['rb'])),
+                    str(_avg(ls['owd'])),
+                    str(_max(ls['owd'])),
+                    str(_avg(ls['loss'])),
+                    str(ls['lost_pkts']),
+                ])
+            cw = [50*mm] + [(W_doc-50*mm)/6]*6
+            lt = Table(tbl_data, colWidths=cw)
+            lt.setStyle(TableStyle([
+                ('BACKGROUND',   (0,0), (-1,0), COL_HDR),
+                ('TEXTCOLOR',    (0,0), (-1,0), colors.white),
+                ('FONTNAME',     (0,0), (-1,0), 'Helvetica-Bold'),
+                ('FONTNAME',     (0,1), (-1,-1), 'Helvetica'),
+                ('FONTSIZE',     (0,0), (-1,-1), 8),
+                ('ALIGN',        (1,0), (-1,-1), 'RIGHT'),
+                ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, COL_ROW]),
+                ('GRID', (0,0), (-1,-1), 0.3, colors.HexColor('#c0ccd8')),
+                ('TOPPADDING',   (0,0), (-1,-1), 3),
+                ('BOTTOMPADDING',(0,0), (-1,-1), 3),
+            ]))
+            story.append(lt)
+            story.append(Spacer(1, 6))
+
+        # Bitrate chart (SVG polyline via reportlab Drawing)
+        if len(bitrate_series) >= 2:
+            story.append(Paragraph("Total bitrate over time (kb/s)", sH2))
+            CH_W, CH_H = float(W_doc), 60.0
+            pad_l, pad_r, pad_t, pad_b = 10.0, 6.0, 6.0, 14.0
+            draw_w = CH_W - pad_l - pad_r
+            draw_h = CH_H - pad_t - pad_b
+
+            values = [v for _, v in bitrate_series]
+            max_v  = max(values) or 1
+            n      = len(values)
+
+            d = Drawing(CH_W, CH_H)
+            # background
+            d.add(Rect(0, 0, CH_W, CH_H, fillColor=colors.HexColor('#f8fafc'), strokeColor=colors.HexColor('#dee2e6'), strokeWidth=0.5))
+            # horizontal grid lines (0, 25%, 50%, 75%, 100%)
+            for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
+                gy = pad_b + frac * draw_h
+                d.add(Line(pad_l, gy, CH_W - pad_r, gy,
+                           strokeColor=colors.HexColor('#dee2e6'), strokeWidth=0.4))
+                label_val = int(max_v * frac)
+                d.add(String(pad_l - 2, gy - 3, str(label_val),
+                             fontSize=5, fillColor=colors.grey, textAnchor='end'))
+            # polyline
+            pts = []
+            for i, v in enumerate(values):
+                x = pad_l + (i / (n - 1)) * draw_w
+                y = pad_b + (v / max_v) * draw_h
+                pts += [x, y]
+            d.add(PolyLine(pts, strokeColor=colors.HexColor('#0d6efd'), strokeWidth=1.2, fillColor=None))
+            # x-axis labels (start / mid / end)
+            for frac, label in ((0.0, bitrate_series[0][0][11:19]),
+                                (0.5, bitrate_series[n//2][0][11:19]),
+                                (1.0, bitrate_series[-1][0][11:19])):
+                x = pad_l + frac * draw_w
+                d.add(String(x, 2, label, fontSize=5, fillColor=colors.grey, textAnchor='middle'))
+            story.append(d)
+            story.append(Spacer(1, 6))
+
+        # StreamHub events
+        if ev_rows:
+            story.append(Paragraph("StreamHub events", sH2))
+            ev_data = [["Timestamp", "Level", "Message"]]
+            for ev in ev_rows:
+                ev_data.append([ev[0], ev[1] or '', ev[2] or ''])
+            ev_cw = [40*mm, 18*mm, W_doc - 58*mm]
+            ev_t = Table(ev_data, colWidths=ev_cw, repeatRows=1)
+            lv_colors = {
+                'ERROR':   colors.HexColor('#f8d7da'),
+                'WARNING': colors.HexColor('#fff3cd'),
+                'WARN':    colors.HexColor('#fff3cd'),
+            }
+            ev_style = [
+                ('BACKGROUND',   (0,0), (-1,0), COL_HDR),
+                ('TEXTCOLOR',    (0,0), (-1,0), colors.white),
+                ('FONTNAME',     (0,0), (-1,0), 'Helvetica-Bold'),
+                ('FONTNAME',     (0,1), (-1,-1), 'Courier'),
+                ('FONTSIZE',     (0,0), (-1,-1), 7),
+                ('GRID',         (0,0), (-1,-1), 0.3, colors.HexColor('#c0ccd8')),
+                ('TOPPADDING',   (0,0), (-1,-1), 2),
+                ('BOTTOMPADDING',(0,0), (-1,-1), 2),
+                ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, COL_ROW]),
+            ]
+            for i, ev in enumerate(ev_rows, start=1):
+                lvl = (ev[1] or '').upper()
+                if lvl in lv_colors:
+                    ev_style.append(('BACKGROUND', (0,i), (-1,i), lv_colors[lvl]))
+            ev_t.setStyle(TableStyle(ev_style))
+            story.append(ev_t)
+
+        story.append(Spacer(1, 10))
+        story.append(HRFlowable(width="100%", thickness=0.5, color=colors.grey))
+        story.append(Paragraph(
+            f"StreamPilot — Alexandre Licinio © 2026 — Stream smarter. Pilot with precision. Broadcast better.",
+            sSmall
+        ))
+
+        doc.build(story)
+        pdf_bytes = buf.getvalue()
+        cherrypy.response.headers['Content-Type'] = 'application/pdf'
+        cherrypy.response.headers['Content-Disposition'] = (
+            f'attachment; filename={pdf_filename}'
+        )
+        return pdf_bytes
+
 def run():
     port = int(os.getenv("StreamPilot", "5555"))
     cherrypy.config.update({
