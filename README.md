@@ -67,7 +67,7 @@ On the first run, all files and the database will be created automatically.
 Set the listening port (example: 5555) and start the server from the project root:
 
 ```bash
-bin/python -m streampilot -port 5555 -name "Alexandre Licinio" -max_streamhubs 4 -user 'admin' -password 'password'
+bin/python -m streampilot -port 5555 -name "John Dear" -max_streamhubs 4 -user 'admin' -password 'password'
 ```
 You can also specify port, name, max_streamhubs thru the following environment variables
 

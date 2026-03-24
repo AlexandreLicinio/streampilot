@@ -66,7 +66,7 @@ Au premier lancement, tous les fichiers ainsi que la db seront automatiquement c
 Définissez le port d’écoute (exemple : 5555) et démarrez le serveur depuis la racine du projet:
 
 ```bash
-bin/python -m streampilot -port 5555 -name "Alexandre Licinio" -max_streamhubs 4 -user 'admin' -password 'password'
+bin/python -m streampilot -port 5555 -name "John Dear" -max_streamhubs 4 -user 'admin' -password 'password'
 ```
 
 > Variables d'environnements
