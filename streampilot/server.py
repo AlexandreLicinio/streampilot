@@ -2670,6 +2670,32 @@ async function repoll(){
 
     @require_login
     @cherrypy.expose
+    def slack_status(self, device_id=None):
+        import json
+        cherrypy.response.headers["Content-Type"] = "application/json; charset=utf-8"
+        if not device_id:
+            return json.dumps({"configured": False}).encode("utf-8")
+        try:
+            did = int(device_id)
+        except Exception:
+            return json.dumps({"configured": False}).encode("utf-8")
+        try:
+            with connect_db() as c:
+                sc = c.execute("SELECT webhook_url FROM slack_config WHERE id=1").fetchone()
+                configured = bool(sc and sc[0] and sc[0].strip())
+                if not configured:
+                    return json.dumps({"configured": False}).encode("utf-8")
+                ds = c.execute(
+                    "SELECT notify_paused FROM device_slack WHERE device_id=?", (did,)
+                ).fetchone()
+                paused = bool(ds and ds[0])
+        except Exception:
+            return json.dumps({"configured": False}).encode("utf-8")
+        return json.dumps({"configured": True, "paused": paused}).encode("utf-8")
+
+
+    @require_login
+    @cherrypy.expose
     def settings(self, msg=None):
         import json as _j, html as _h
         with connect_db() as c:
