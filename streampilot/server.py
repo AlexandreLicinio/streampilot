@@ -285,6 +285,11 @@ class BackgroundPoller:
                                 or str(did)
                             device_host = host
                             LOGGER.observe_payload(device_id, device_host, payload)
+                            # Persist input→output name mapping
+                            try:
+                                _persist_output_map(host, payload)
+                            except Exception as _ome:
+                                cherrypy.log(f'[output_map] persist error: {_ome}')
                             # Fetch and persist StreamHub logs (plain text /logs endpoint)
                             try:
                                 from collect.scripts.streamhub import fetch_logs_structured
@@ -375,28 +380,125 @@ def _ensure_db_indexes(db):
         db.execute("CREATE INDEX IF NOT EXISTS idx_live_sample_sid_id ON live_sample(session_id, id)")
     except Exception: pass
 
-def _filter_logs_for_input(rows, input_index, input_identifier):
-    """Filter StreamHub log rows for a specific session input."""
+def _get_linked_output_names(device_host, input_index):
+    """Return set of lowercase output names linked to this input,
+    queried from the persisted device_output_map table.
+    input_index is 1-indexed (as stored in DB and Source #N logs).
+    """
+    try:
+        with connect_db() as c:
+            rows = c.execute(
+                'SELECT output_name FROM device_output_map '
+                'WHERE device_host=? AND input_index=?',
+                (device_host, int(input_index))
+            ).fetchall()
+        return {r[0] for r in rows}
+    except Exception:
+        return set()
+
+
+def _filter_logs_for_input(rows, input_index, input_identifier, device_id=None):
+    """Filter StreamHub log rows for a specific session input.
+    Includes:
+    - Source #N / input N logs matching this input (1-indexed)
+    - IP output logs whose output name is linked to this input
+    - Logs mentioning the input_identifier
+    Excludes:
+    - Config change (global noise)
+    - Source #N / input N logs belonging to other inputs
+    """
     import re as _re2
-    _PAT = _re2.compile(
-        r'(?:source\s*#|\bfor\s+input\s+|\bstopping live for input\s+)(\d+)',
+    _PAT_SRC = _re2.compile(
+        r'(?:source\s*#|\bfor\s+input\s+|\bstopping live for input\s+|'
+        r'changing video capped bitrate for input\s+)(\d+)',
         _re2.IGNORECASE
     )
-    idx_str = str(input_index) if input_index is not None else None
+    _PAT_IPOUT = _re2.compile(
+        r"(?:ip output|sdi output|ndi output)[\s'\"]+([\w\-\.]+)",
+        _re2.IGNORECASE
+    )
+    _EXCLUDE = _re2.compile(
+        r'^config change',
+        _re2.IGNORECASE
+    )
+    # input_index in DB is 1-indexed — matches Source #N directly
+    idx_str = str(int(input_index)) if input_index is not None else None
     ident_lower = (input_identifier or '').strip().lower()
+    linked_outputs = _get_linked_output_names(device_id, input_index) if device_id else set()
     result = []
     for row in rows:
         msg = (row[-1] or '')
-        m = _PAT.search(msg)
-        if m:
-            # Log explicitly references a source/input number
-            if idx_str and m.group(1) == idx_str:
+        msg_lower = msg.lower()
+        # Exclude Config change
+        if _EXCLUDE.search(msg):
+            continue
+        # Source #N or input N reference
+        m_src = _PAT_SRC.search(msg)
+        if m_src:
+            if idx_str and m_src.group(1) == idx_str:
                 result.append(row)
-            # else: other input, skip
-        else:
-            # Generic log or identifier match — include
+            # else: belongs to another input, skip
+            continue
+        # IP output log
+        m_ip = _PAT_IPOUT.search(msg)
+        if m_ip:
+            out_name = m_ip.group(1).lower()
+            # Normalise SDI log: "SDI output 1" captured as "1" → "sdi-1"
+            if msg_lower.startswith('sdi output') and out_name.isdigit():
+                out_name = f'sdi-{out_name}'
+            if linked_outputs and out_name in linked_outputs:
+                result.append(row)
+            # else: output not linked to this input, skip
+            continue
+        # Identifier match (e.g. transmitter name appears in message)
+        if ident_lower and ident_lower in msg_lower:
             result.append(row)
     return result
+
+
+def _persist_output_map(host: str, payload: dict):
+    """Persist the input→output name mapping from the current payload.
+    Uses INSERT OR REPLACE so it stays up to date every poll cycle.
+    ip_outputs keys are 0-indexed in payload; input_index in DB is 1-indexed.
+    """
+    if not payload or not host:
+        return
+    try:
+        inputs = payload.get('inputs') or {}
+        rows = []
+        for key, inp in inputs.items():
+            if not str(key).isdigit():
+                continue
+            # payload key is 0-indexed; store as 1-indexed to match Source #N
+            input_idx_1 = int(key) + 1
+            # IP outputs
+            ip_outputs = (inp or {}).get('ip_outputs') or {}
+            for out in ip_outputs.values():
+                name = (out or {}).get('name')
+                if name:
+                    rows.append((host, input_idx_1, str(name).lower()))
+            # SDI (physical) outputs
+            sdi_outputs = (inp or {}).get('sdi_outputs') or {}
+            for sdi_key in sdi_outputs:
+                rows.append((host, input_idx_1, f'sdi-{sdi_key}'))
+            # NDI outputs
+            ndi_outputs = (inp or {}).get('ndi_outputs') or {}
+            for out in ndi_outputs.values():
+                name = (out or {}).get('name')
+                if name:
+                    rows.append((host, input_idx_1, str(name).lower()))
+        if rows:
+            with connect_db() as c:
+                c.executemany(
+                    'INSERT OR REPLACE INTO device_output_map(device_host, input_index, output_name) '
+                    'VALUES(?,?,?)',
+                    rows
+                )
+    except Exception as _e:
+        try:
+            import cherrypy; cherrypy.log(f'[output_map] {_e}')
+        except Exception:
+            pass
 
 
 def connect_db():
@@ -436,6 +538,15 @@ def connect_db():
     try:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_shlog_host_ts ON streamhub_log(device_host, ts)")
     except Exception: pass
+
+    # Input → Output mapping (persisted every poll cycle)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS device_output_map (
+            device_host  TEXT NOT NULL,
+            input_index  INTEGER NOT NULL,
+            output_name  TEXT NOT NULL,
+            PRIMARY KEY (device_host, output_name)
+        )""")
 
     # Slack global config
     conn.execute("""
@@ -1241,7 +1352,7 @@ class App:
                     "WHERE device_host=? AND ts>=?" + (" AND ts<=?" if ts_ec else "") + " ORDER BY ts ASC",
                     (s[2], ts_sc) + ((ts_ec,) if ts_ec else ())
                 ).fetchall() if ts_sc else []
-            ev_r = _filter_logs_for_input(ev_r, s[4], s[5])
+            ev_r = _filter_logs_for_input(ev_r, s[4], s[5], device_id=s[2])
             payload["events"] = [{"ts":r[0],"node":r[1],"level":r[2],"message":r[3]} for r in ev_r]
         except Exception:
             payload["events"] = []
@@ -2459,7 +2570,7 @@ async function repoll(){
                 "WHERE device_host=? AND ts >= ? AND ts <= ? ORDER BY ts ASC",
                 (host, ts_start_cmp, ts_end_cmp)
             ).fetchall()
-        rows = _filter_logs_for_input(rows, input_index, input_identifier)
+        rows = _filter_logs_for_input(rows, input_index, input_identifier, device_id=host)
         events = [{"ts": r[0], "node": r[1], "level": r[2], "message": r[3]} for r in rows]
         return json.dumps({"ok": True, "events": events}).encode("utf-8")
 
@@ -2514,7 +2625,7 @@ async function repoll(){
                 "WHERE device_host=? AND ts >= ? AND ts <= ? ORDER BY ts ASC",
                 (s[2], ts_start_cmp, ts_end_cmp)
             ).fetchall() if ts_start_cmp else []
-            ev_rows = _filter_logs_for_input(_ev_raw, s[4], s[5])
+            ev_rows = _filter_logs_for_input(_ev_raw, s[4], s[5], device_id=s[2])
 
             dev_name = c.execute(
                 "SELECT name FROM devices WHERE host=? LIMIT 1", (s[2],)

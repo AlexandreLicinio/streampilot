@@ -253,6 +253,7 @@ def fetch_streamhub(base_url: str, token: str | None = None, timeout: int = 5) -
             "low_tx_bitrate": False,
             "dropped": {},
             "sdi_outputs": {},
+            "ndi_outputs": {},
             "ip_outputs": {},
             "video_ifb": {"video_ifb_preset_status": None, "video_ifb_decoding_source": None, "video_ifb_decoder": None},
             "encoders": {},
@@ -271,7 +272,8 @@ def fetch_streamhub(base_url: str, token: str | None = None, timeout: int = 5) -
         inputs_list = []
 
     outs_sdi = (sh_outputs or {}).get("output", [])
-    outs_ip = (sh_outputs or {}).get("IPOutput", [])
+    outs_ip  = (sh_outputs or {}).get("IPOutput", [])
+    outs_ndi = (sh_outputs or {}).get("NDIOutput", [])
 
     counters = {"on": 0, "idle": 0, "off": 0, "error": 0}
 
@@ -441,6 +443,18 @@ def fetch_streamhub(base_url: str, token: str | None = None, timeout: int = 5) -
                         "status": {2: "on", 1: "idle", 3: "error"}.get(int(out.get("status", 1)), "idle"),
                     }
 
+            # NDI outputs
+            for j in range(len(outs_ndi)):
+                out = outs_ndi[j] or {}
+                if out.get("enable") and out.get("input") == i.get("name"):
+                    key = str(j)
+                    d["ndi_outputs"][key] = {
+                        "name": out.get("name"),
+                        "ndi_source_name": out.get("ndiSourceName"),
+                        "connections": out.get("nbConnect"),
+                        "status": {2: "on", 1: "idle", 3: "error"}.get(int(out.get("status", 1)), "idle"),
+                    }
+
         # Detect log-driven live events (start/stop) for this input
         try:
             if logs_ok:
@@ -454,7 +468,8 @@ def fetch_streamhub(base_url: str, token: str | None = None, timeout: int = 5) -
 
     return True, payload
 
-# --- Structured log fetching
+
+# ── Structured log fetching ──────────────────────────────────────────────────
 
 import hashlib as _hashlib
 
@@ -466,24 +481,29 @@ _LOG_RE = re.compile(
     r"(?P<msg>.*)$"
 )
 
+
 def _log_fp(raw: str) -> str:
     return _hashlib.sha1(raw.encode("utf-8", errors="replace")).hexdigest()
+
 
 def _parse_log_line(raw: str) -> Dict[str, Any]:
     raw = raw.rstrip()
     m = _LOG_RE.match(raw)
     if not m:
-        return {"ts": None, "node": None, "level": "INFO", "message": raw, "raw": raw, "fp": _log_fp(raw)}
+        return {"ts": None, "node": None, "level": "INFO",
+                "message": raw, "raw": raw, "fp": _log_fp(raw)}
     return {
-        "ts": m.group("ts"),
-        "node": m.group("node"),
-        "level": m.group("level"),
+        "ts":      m.group("ts"),
+        "node":    m.group("node"),
+        "level":   m.group("level"),
         "message": m.group("msg"),
-        "raw": raw,
-        "fp": _log_fp(raw),
+        "raw":     raw,
+        "fp":      _log_fp(raw),
     }
 
-def fetch_logs_structured(base_url: str, token: str | None = None, timeout: int = 5) -> Tuple[bool, list]:
+
+def fetch_logs_structured(base_url: str, token: str | None = None,
+                          timeout: int = 5) -> Tuple[bool, list]:
     """Fetch /logs (plain text) and return (ok, list[dict]) with parsed fields."""
     if not token:
         return False, []
