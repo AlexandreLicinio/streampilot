@@ -80,7 +80,7 @@ class BackgroundPoller:
 
     def _load_device_slack(self, device_id):
         _COLS = 'device_id,notify_session,notify_drops,notify_owd_threshold,'\
-                'notify_bitrate_min,notify_poller_error,notify_logs,notify_paused,ignore_contains'
+                'notify_bitrate_min,notify_poller_error,notify_logs,notify_connection,notify_paused,ignore_contains'
         try:
             with connect_db() as c:
                 c.execute('INSERT OR IGNORE INTO device_slack(device_id) VALUES(?)', (device_id,))
@@ -110,7 +110,7 @@ class BackgroundPoller:
 
     def _notify_new_logs(self, host, device_id, dev_name, log_entries, cfg, ds):
         import json as _j, hashlib as _hl, re as _re
-        if not ds.get('notify_logs') or ds.get('notify_paused'): return
+        if ds.get('notify_paused'): return
         webhook, channel, username = cfg
         ignore_list = []
         try: ignore_list = [s.lower() for s in _j.loads(ds.get('ignore_contains') or '[]') if s.strip()]
@@ -123,12 +123,32 @@ class BackgroundPoller:
                 dq.append(fp)
             self._slack_initialized.add(host)
             return
+        _PAT_CONN  = _re.compile(r'source\s*#(\d+):\s*connection of ([^(]+)', _re.IGNORECASE)
+        _PAT_DCONN = _re.compile(r'source\s*#(\d+):\s*disconnection of (\S+)', _re.IGNORECASE)
         for e in log_entries:
             fp = e.get('fp') or _hl.sha1((e.get('raw') or '').encode()).hexdigest()
             if fp in seen_set: continue
             raw_line = e.get('raw') or f"{e.get('ts','')} {e.get('message','')}"
+            msg = e.get('message') or ''
             if ignore_list and any(s in raw_line.lower() for s in ignore_list):
                 dq.append(fp); seen_set.add(fp); continue
+            # Specific connection/disconnection notifications
+            mc = _PAT_CONN.search(msg)
+            md = _PAT_DCONN.search(msg)
+            if mc and ds.get('notify_connection', 1) and not ds.get('notify_paused'):
+                src_n, tx_name = mc.group(1), mc.group(2).strip()
+                self._slack_post(webhook,
+                    f':satellite_antenna: *{dev_name}* — Source #{src_n} `{tx_name}` connected',
+                    channel, username, color='#439FE0')
+                dq.append(fp); seen_set.add(fp); continue
+            if md and ds.get('notify_connection', 1) and not ds.get('notify_paused'):
+                src_n, tx_name = md.group(1), md.group(2).strip()
+                self._slack_post(webhook,
+                    f':zzz: *{dev_name}* — Source #{src_n} `{tx_name}` disconnected',
+                    channel, username, color='#9B9B9B')
+                dq.append(fp); seen_set.add(fp); continue
+            # Generic log forwarding
+            if not ds.get('notify_logs'): dq.append(fp); seen_set.add(fp); continue
             level = (e.get('level') or 'INFO').upper()
             color_map = {'ERROR':'danger','WARN':'warning','WARNING':'warning','INFO':'#439FE0','DEBUG':'#9B9B9B'}
             slack_line = _re.sub(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\s+', '', raw_line)
@@ -440,6 +460,7 @@ def connect_db():
         "notify_bitrate_min INTEGER DEFAULT 0,"
         "notify_poller_error INTEGER DEFAULT 1,"
         "notify_logs INTEGER DEFAULT 1,"
+        "notify_connection INTEGER DEFAULT 1,"
         "notify_paused INTEGER DEFAULT 0,"
         "ignore_contains TEXT DEFAULT '" + _DI + "'"
         ")"
@@ -449,6 +470,8 @@ def connect_db():
         _ec = {r[1] for r in conn.execute("PRAGMA table_info(device_slack)").fetchall()}
         if "notify_paused" not in _ec:
             conn.execute("ALTER TABLE device_slack ADD COLUMN notify_paused INTEGER DEFAULT 0")
+        if "notify_connection" not in _ec:
+            conn.execute("ALTER TABLE device_slack ADD COLUMN notify_connection INTEGER DEFAULT 1")
     except Exception: pass
 
     return conn
@@ -2656,7 +2679,7 @@ async function repoll(){
             for d in devs:
                 c.execute("INSERT OR IGNORE INTO device_slack(device_id) VALUES(?)", (d[0],))
                 _SCOLS = ('device_id,notify_session,notify_drops,notify_owd_threshold,'
-                          'notify_bitrate_min,notify_poller_error,notify_logs,notify_paused,ignore_contains')
+                          'notify_bitrate_min,notify_poller_error,notify_logs,notify_connection,notify_paused,ignore_contains')
                 r = c.execute('SELECT ' + _SCOLS + ' FROM device_slack WHERE device_id=?', (d[0],)).fetchone()
                 if r:
                     ds_map[d[0]] = dict(zip(_SCOLS.split(','), r))
@@ -2715,6 +2738,10 @@ async function repoll(){
                     <div class="col-auto"><div class="form-check">
                       <input class="form-check-input" type="checkbox" name="notify_logs" id="nl_{did}" {chk(ds.get("notify_logs",1))}>
                       <label class="form-check-label" for="nl_{did}">Forward all logs</label>
+                    </div></div>
+                    <div class="col-auto"><div class="form-check">
+                      <input class="form-check-input" type="checkbox" name="notify_connection" id="nc_{did}" {chk(ds.get("notify_connection",1))}>
+                      <label class="form-check-label" for="nc_{did}">Transmitter connection / disconnection</label>
                     </div></div>
                   </div>
                   <div class="row g-2 mb-2">
@@ -2801,7 +2828,8 @@ async function repoll(){
     @cherrypy.expose
     def settings_device_save(self, device_id=None, notify_session=None, notify_drops=None,
                               notify_owd_threshold='0', notify_bitrate_min='0',
-                              notify_poller_error=None, notify_logs=None, ignore_contains=''):
+                              notify_poller_error=None, notify_logs=None,
+                              notify_connection=None, ignore_contains=''):
         import json as _j
         if not device_id:
             raise cherrypy.HTTPRedirect("/settings")
@@ -2811,6 +2839,7 @@ async function repoll(){
         nd  = 1 if notify_drops        else 0
         npe = 1 if notify_poller_error else 0
         nl  = 1 if notify_logs         else 0
+        nc  = 1 if notify_connection   else 0
         try: owd = max(0, int(notify_owd_threshold or 0))
         except: owd = 0
         try: rbm = max(0, int(notify_bitrate_min or 0))
@@ -2821,8 +2850,8 @@ async function repoll(){
             c.execute("INSERT OR IGNORE INTO device_slack(device_id) VALUES(?)", (did,))
             c.execute("UPDATE device_slack SET notify_session=?,notify_drops=?,"
                       "notify_owd_threshold=?,notify_bitrate_min=?,"
-                      "notify_poller_error=?,notify_logs=?,ignore_contains=? WHERE device_id=?",
-                      (ns, nd, owd, rbm, npe, nl, ign, did))
+                      "notify_poller_error=?,notify_logs=?,notify_connection=?,ignore_contains=? WHERE device_id=?",
+                      (ns, nd, owd, rbm, npe, nl, nc, ign, did))
         raise cherrypy.HTTPRedirect("/settings?msg=Device+settings+saved")
 
     @require_login
