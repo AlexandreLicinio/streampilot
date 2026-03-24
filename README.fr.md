@@ -66,14 +66,16 @@ Au premier lancement, tous les fichiers ainsi que la db seront automatiquement c
 Définissez le port d’écoute (exemple : 5555) et démarrez le serveur depuis la racine du projet:
 
 ```bash
-bin/python -m streampilot -port 5555 -name "John Dear" -max_streamhubs 4
+bin/python -m streampilot -port 5555 -name "Alexandre Licinio" -max_streamhubs 4 -user 'admin' -password 'password'
 ```
 
 > Variables d'environnements
 
-- `-port` : Port TCP de l'UI (par défaut: 5555).
-- `-name` : Nom générique dans l'UI.
-- `-max_streamhubs` : Nombre maximum de Streamhub pollés par l'application (par défaut: 4)
+> - `-port` : Port TCP de l'UI (par défaut: 5555)
+> - `-name` : Nom générique dans l'UI
+> - `-max_streamhubs` : Nombre maximum de Streamhub pollés par l'application (par défaut: 4)
+> - `-user`: Utilisateur pour le portail d'accès (par défaut: admin)
+> - `-password`: Mot de passe pour le portail d'accès (par défaut: admin)
 
 L’application sera accessible sur [http://localhost:5555](http://localhost:5555).
 

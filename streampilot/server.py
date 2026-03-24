@@ -525,12 +525,31 @@ def _license_badge_html():
 def _license_expired_html():
     return b''
 
+def _get_credentials():
+    """Return (username, password) from env, with defaults."""
+    u = (os.getenv('SP_USER') or 'admin').strip()
+    p = (os.getenv('SP_PASSWORD') or 'admin').strip()
+    return u, p
+
 def current_user():
-    return {'username': 'public'}
+    try:
+        username = cherrypy.session.get('username')
+        if username:
+            return {'username': username}
+    except Exception:
+        pass
+    return None
 
 def require_login(fn):
     @functools.wraps(fn)
     def _wrap(*args, **kwargs):
+        try:
+            if not cherrypy.session.get('username'):
+                raise cherrypy.HTTPRedirect('/login')
+        except cherrypy.HTTPRedirect:
+            raise
+        except Exception:
+            raise cherrypy.HTTPRedirect('/login')
         return fn(*args, **kwargs)
     return _wrap
 
@@ -548,6 +567,70 @@ def slow(th=0.25):  # log > 250 ms
     return deco
 
 class App:
+
+    @cherrypy.expose
+    def login(self, msg=None):
+        import html as _h
+        u, _ = _get_credentials()
+        msg_html = ''
+        if msg == 'error':
+            msg_html = '<div class="alert alert-danger mt-3">Identifiants incorrects.</div>'
+        body = f'''<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <title>StreamPilot — Login</title>
+  <style>
+    body {{ background-color: #f0f4f8; display: flex; flex-direction: column; min-height: 100vh; margin: 0; }}
+    .login-wrap {{ flex: 1; display: flex; align-items: center; justify-content: center; }}
+    .login-card {{ width: 100%; max-width: 380px; padding: 2.5rem; background: #fff; border-radius: 12px; box-shadow: 0 4px 24px rgba(0,0,0,.10); }}
+    .login-logo {{ display: block; max-width: 200px; margin: 0 auto 1.5rem; }}
+  </style>
+</head>
+<body>
+  <div class="login-wrap">
+    <div class="login-card">
+      <img src="/static/StreamPilot.png" alt="StreamPilot" class="login-logo">
+      <form method="post" action="/login_post">
+        <div class="mb-3">
+          <label class="form-label fw-semibold">Username</label>
+          <input class="form-control" type="text" name="username" autofocus autocomplete="username" required>
+        </div>
+        <div class="mb-3">
+          <label class="form-label fw-semibold">Password</label>
+          <input class="form-control" type="password" name="password" autocomplete="current-password" required>
+        </div>
+        {msg_html}
+        <button class="btn btn-primary w-100 mt-2" type="submit">Sign in</button>
+      </form>
+    </div>
+  </div>
+  <footer class="text-center text-muted mt-4 mb-3 small">
+    Alexandre Licinio &copy; 2026 &mdash; StreamPilot &mdash; Stream smarter. Pilot with precision. Broadcast better.
+  </footer>
+</body>
+</html>'''
+        cherrypy.response.headers['Content-Type'] = 'text/html; charset=utf-8'
+        return body.encode('utf-8')
+
+    @cherrypy.expose
+    def login_post(self, username='', password=''):
+        expected_user, expected_pass = _get_credentials()
+        if username.strip() == expected_user and password == expected_pass:
+            cherrypy.session['username'] = username.strip()
+            raise cherrypy.HTTPRedirect('/')
+        raise cherrypy.HTTPRedirect('/login?msg=error')
+
+    @cherrypy.expose
+    def logout(self):
+        try:
+            cherrypy.session.clear()
+        except Exception:
+            pass
+        raise cherrypy.HTTPRedirect('/login')
+
     @require_login
     @cherrypy.expose
     def log_import(self, **params):
@@ -2905,6 +2988,10 @@ async function repoll(){
 
 def run():
     port = int(os.getenv("StreamPilot", "5555"))
+    # Warn if default credentials are used
+    _u, _p = _get_credentials()
+    if _u == 'admin' and _p == 'admin':
+        cherrypy.log('[auth] WARNING: using default credentials admin/admin — set -user and -password')
     cherrypy.config.update({
         "server.socket_port": port,
         "server.socket_host": "0.0.0.0",
