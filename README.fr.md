@@ -142,7 +142,7 @@ Vous pouvez définir un seuil afin d'être alerté en cas de dépassement d'une 
   <img src="settings_notifications_per_devices.png" alt="Per-devices settings for notifications" width="700"/>
 </p>
 
---
+---
 
 ## Sessions
 

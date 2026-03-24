@@ -145,7 +145,7 @@ You can define an OWD alert threshold and a bitrate alert.
   <img src="settings_notifications_per_devices.png" alt="Per-devices settings for notifications" width="700"/>
 </p>
 
---
+---
 
 ## Sessions
 
