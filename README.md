@@ -121,9 +121,88 @@ While the transmitter is **live**, charts and timeline progress continuously. If
 
 ### Slack notifications:
 
+<p align="center">
+  <img src="slack_notifications_app.png" alt="Slack notifications app" width="700"/>
+</p>
+
 Follow the instructions to create a webhook [https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/), open **Settings** and configure the global settings. Then configure for each StreamHub.
 
 In the **Ignore contains (one filter per line)** box, you can add all or part of a log to filter it and avoid receiving it. This is very useful for preventing alerts about irrelevant information.
+
+```bash
+StreamHub user admin
+StreamHub is disconnected from Aviwest Hub service
+StreamHub is connected to Aviwest Hub service
+read ECONNRESET
+Nodejs is restarting...
+502 Server Error
+HTTPSConnectionPool
+```
+
+You can define an OWD alert threshold and a bitrate alert.
+
+<p align="center">
+  <img src="settings_notifications_per_devices.png" alt="Per-devices settings for notifications" width="700"/>
+</p>
+
+--
+
+## Sessions
+
+### The map (gps):
+
+When a transmitter goes live, a new session is created. If the GPS is receiving data from satellite, a map will display the exact position of the transmitter. If you tick the **Follow live** button the timeline will grow in real-time and fill all the charts with interfaces stats. In the map, a colored line will be draw between gps new points. The colour are based on **OWD** which is half of the RTT for each interfaces. 
+
+| Signal        | OWD (in ms, rtt/2) |
+| ------------- |:------------------:|
+| Good          | less 100 ms        |
+| Fair          | from 100 to 200 ms |
+| Poor          | more than 200 ms   |
+
+At the end (or even during a live) of a session you can move the cursor of the timeline to review the recorded data. A vertical line, based on the timeline cursor will appear on each charts. 
+
+<p align="center">
+  <img src="gps_map_legend.png" alt="GPS map" width="700"/>
+</p>
+
+### Events (logs StreamHub):
+
+All the logs from the StreamHub are sorted per transmitter (input) and displayed both on a timeline and a table. Theses logs will can be also exported in PDF and JSON at the end of the live.
+
+<p align="center">
+  <img src="events_logs_timeline.png" alt="Events lots timeline" width="700"/>
+</p>
+
+---
+
+## Haivision:
+
+StreamHub is the main data and stats collector for all transmitters. Here are the data and stats actually provided by the api (in REST).
+
+| endpoint        | api                |
+| ----------------|:------------------:|
+| bitrate         | OK                 |
+| gps             | OK                 |
+| OWD             | OK                 |
+| RTT             | OK                 |
+| loss            | OK                 |
+| lost packets    | OK                 |
+| mobile operator | NOK                |
+| 4G/5G band      | NOK                |
+| 3G/4G/5G        | NOK                |
+| snr             | NOK                |
+| rssi            | NOK                |
+| priority        | NOK                |
+
+**StreamPilot** is OKAY with theses firmwares:
+
+| model         | firmware version   |
+| ------------- |:------------------:|
+| air series    | 6.2.0              |
+| streamhub     | 4.4.6_SP1          |
+| rack400       | 4.2.0              |
+| rack2-3       | 6.2.0              |
+| PRO3 series   | 6.2.0              |
 
 ---
 

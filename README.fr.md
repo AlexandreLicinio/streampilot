@@ -126,6 +126,50 @@ Suivez les instructions via ce lien [https://docs.slack.dev/messaging/sending-me
 
 Dans l'encadré **Ignore contains (one filter per line)** vous pouvez ajouter tout ou partie d'un log afin de le filtrer et de ne pas le recevoir. Cela est très pratique pour ne pas être alerté à propos d'une information non pertinente.
 
+```bash
+StreamHub user admin
+StreamHub is disconnected from Aviwest Hub service
+StreamHub is connected to Aviwest Hub service
+read ECONNRESET
+Nodejs is restarting...
+502 Server Error
+HTTPSConnectionPool
+```
+
+Vous pouvez définir un seuil afin d'être alerté en cas de dépassement d'une certaine valeur pour l'OWD et le bitrate total.
+
+<p align="center">
+  <img src="settings_notifications_per_devices.png" alt="Per-devices settings for notifications" width="700"/>
+</p>
+
+--
+
+## Sessions
+
+### La carte (gps):
+
+Lorsqu'un émetteur est actif, une nouvelle session est créée. Si le GPS reçoit des données par satellite, une carte affichera la position exacte de l'émetteur. En cochant la case **Follow live**, la timeline s'actualisera en temps réel et tous les graphiques afficheront les statistiques des interfaces. Sur la carte, une ligne colorée sera tracée entre les nouveaux points GPS. La couleur est basée sur le **OWD**, qui correspond à la moitié du RTT pour chaque interface.
+
+| Signal        | OWD (in ms, rtt/2) |
+| ------------- |:------------------:|
+| Good          | less 100 ms        |
+| Fair          | from 100 to 200 ms |
+| Poor          | more than 200 ms   |
+
+À la fin d'une session (ou même pendant le live), vous pouvez déplacer le curseur de la timeline pour consulter les données enregistrées. Une ligne verticale, correspondant à la position du curseur, apparaîtra sur chaque graphique. 
+
+<p align="center">
+  <img src="gps_map_legend.png" alt="GPS map" width="700"/>
+</p>
+
+### Events (logs StreamHub):
+
+Tous les logs de StreamHub sont triés par transmetteur (input) et affichés sous forme de chronologie et de tableau. Ces journaux peuvent également être exportés aux formats PDF et JSON à la fin de la diffusion en direct.
+
+<p align="center">
+  <img src="events_logs_timeline.png" alt="Events lots timeline" width="700"/>
+</p>
+
 ---
 
 ## Fonctionnalités:
@@ -147,6 +191,37 @@ Dans l'encadré **Ignore contains (one filter per line)** vous pouvez ajouter to
 - **Thème clair/sombre** via toggle.  
 - **Dashboard responsive** (Bootstrap 5).
 - **Notifications slack** via webhook
+
+---
+
+## Haivision:
+
+Le StreamHub est le collecteur de l'ensemble des données des transmetteurs Haivision. 
+Voici les données actuellement présente via l'API qui sont utilisées par interface réseau.
+
+| endpoint        | api                |
+| ----------------|:------------------:|
+| bitrate         | OK                 |
+| gps             | OK                 |
+| RTT             | OK                 |
+| loss            | OK                 |
+| lost packets    | OK                 |
+| operateur mobile| NOK                |
+| 4G/5G bande     | NOK                |
+| 3G/4G/5G        | NOK                |
+| snr             | NOK                |
+| rssi            | NOK                |
+| priorité        | NOK                |
+
+**StreamPilot** supporte ces firmwares:
+
+| modele        | firmware version   |
+| ------------- |:------------------:|
+| air series    | 6.2.0              |
+| streamhub     | 4.4.6_SP1          |
+| rack400       | 4.2.0              |
+| rack2-3       | 6.2.0              |
+| PRO3 series   | 6.2.0              |
 
 ---
 
