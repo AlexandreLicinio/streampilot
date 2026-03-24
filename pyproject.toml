@@ -4,6 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "streampilot"
+version = '0.5.0'
 authors = [
   {name = "Alexandre Licinio", email = ""},
 ]
