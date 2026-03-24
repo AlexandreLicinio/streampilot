@@ -2988,11 +2988,17 @@ async function repoll(){
 
 def run():
     port = int(os.getenv("StreamPilot", "5555"))
+    mode = (os.getenv("SP_MODE") or "http").strip().lower()
+    proxy_mode = (mode == "proxy")
     # Warn if default credentials are used
     _u, _p = _get_credentials()
     if _u == 'admin' and _p == 'admin':
         cherrypy.log('[auth] WARNING: using default credentials admin/admin — set -user and -password')
-    cherrypy.config.update({
+    if proxy_mode:
+        cherrypy.log('[mode] Running behind reverse proxy (HTTPS) — proxy headers enabled, Secure cookie flag on')
+    else:
+        cherrypy.log('[mode] Running in direct HTTP mode')
+    cfg = {
         "server.socket_port": port,
         "server.socket_host": "0.0.0.0",
         "server.thread_pool": 32,
@@ -3005,7 +3011,14 @@ def run():
         "tools.sessions.httponly": True,
         "log.screen": True,
         "tools.sessions.secret": os.getenv("SP_SESSION_SECRET", secrets.token_hex(16)),
-    })
+    }
+    if proxy_mode:
+        cfg["tools.proxy.on"] = True
+        cfg["tools.proxy.local"] = "X-Forwarded-Host"
+        cfg["tools.proxy.remote"] = "X-Forwarded-For"
+        cfg["tools.proxy.scheme"] = "X-Forwarded-Proto"
+        cfg["tools.sessions.secure"] = True
+    cherrypy.config.update(cfg)
 
     # Start background poller so sessions start/stop even when Dashboard is not open
     global POLLER

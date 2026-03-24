@@ -66,16 +66,39 @@ bin/python -m pip install CherryPy Mako requests reportlab
 On the first run, all files and the database will be created automatically.
 Set the listening port (example: 5555) and start the server from the project root:
 
+### Dev / LAN (self-hosted):
+
 ```bash
 bin/python -m streampilot -port 5555 -name "John Dear" -max_streamhubs 4 -user 'admin' -password 'password'
 ```
-You can also specify port, name, max_streamhubs thru the following environment variables
+
+### Behind Nginx in HTTPS (proxy):
+
+Example of configuration in Nginx:
+
+```bash
+location / {
+    proxy_pass         http://127.0.0.1:5555;
+    proxy_set_header   Host              $host;
+    proxy_set_header   X-Forwarded-For   $remote_addr;
+    proxy_set_header   X-Forwarded-Proto https;
+    proxy_set_header   X-Forwarded-Host  $host;
+    proxy_read_timeout 60s;
+}
+```
+
+```bash
+bin/python -m streampilot -port 5555 -name "John Dear" -max_streamhubs 4 -user 'admin' -password 'password' -mode proxy
+```
+
+You can also specify port, name, max_streamhubs thru the following environment variables:
 
 > - `-port`: UI TCP port (default: 5555)
 > - `-name`: Generic name displayed in the UI
 > - `-max_streamhubs`: Maximum number of StreamHubs polled by the app (default: 4)
 > - `-user`: Username for the login portal (default: admin)
 > - `-password`: Password for the login portal (default: admin)
+> - `-mode`: If working behind a Nginx, hosting HTTPS certificates (default: proxy)
 
 The app will be available at [http://localhost:5555](http://localhost:5555).
 
