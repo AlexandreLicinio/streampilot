@@ -166,6 +166,14 @@ Vous pouvez définir un seuil afin d'être alerté en cas de dépassement d'une 
   <img src="settings_notifications_per_devices.png" alt="Per-devices settings for notifications" width="700"/>
 </p>
 
+### rapports PDF:
+
+En cliquant sur le bouton PDF, vous pouvez télécharger un rapport pour chaque session. Ce rapport contient toutes les informations essentielles, à l'exception de la carte GPS, mais vous pouvez vous même faire une capture d'écran :)  Le rapport affiche les logs, classés par input SST. 
+
+<p align="center">
+  <img src="report_ex.png" alt="PDF report" width="700"/>
+</p>
+
 ---
 
 ## Sessions

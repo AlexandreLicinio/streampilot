@@ -170,6 +170,15 @@ You can define an OWD alert threshold and a bitrate alert.
   <img src="settings_notifications_per_devices.png" alt="Per-devices settings for notifications" width="700"/>
 </p>
 
+### pdf reports:
+
+By clicking on the PDF button you can download a report for each session. All the most needed informations are in the report except the map, but you can still do a screen capture :) 
+The report displays the logs sorted by SST input.
+
+<p align="center">
+  <img src="report_ex.png" alt="PDF report" width="700"/>
+</p>
+
 ---
 
 ## Sessions
