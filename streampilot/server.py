@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 # Copyright (C) 2026 Alexandre Licinio
-__version__ = '0.5.0'
+__version__ = '0.6.0'
 import sys
 from pathlib import Path
 HERE = Path(__file__).resolve()

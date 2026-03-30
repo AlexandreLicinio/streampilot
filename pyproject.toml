@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "streampilot"
-version = '0.5.0'
+version = '0.6.0'
 authors = [
   {name = "Alexandre Licinio", email = ""},
 ]
@@ -13,11 +13,12 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "LGPL-2.1-or-later"
 license-files = ["README_LICENSE_SECTION.md", "LICENSE"]
-keywords = ["gps", "4G", "5G"]
+keywords = ["gps", "4G", "5G", "SRT", "haivision"]
 dependencies = [
   "requests",
   "CherryPy",
   "Mako",
+  "reportlab",
 ]
 dynamic = ["version"]
 
