@@ -5,13 +5,13 @@ Copyright (C) 2026 Alexandre Licinio
 <%inherit file="base.html"/>
     <%block name="body">
     <div class="d-flex justify-content-between align-items-center mb-3 w-100">
-    <h1 class="h3 m-0">Dashboard</h1>
+    <h1 class="h3 m-0">StreamHub</h1>
     <div>
     <a class="btn btn-outline-secondary me-2" href="/logs_ui">Logs</a>
     % if not devices:
-    <a class="btn btn-primary" href="/devices">Add StreamHub</a>
+    <a class="btn btn-primary" href="/devices">Add device</a>
     % else:
-    <a class="btn btn-outline-secondary" href="/devices" title="Manage StreamHub">Manage StreamHub</a>
+    <a class="btn btn-outline-secondary ms-1" href="/devices" title="Manage devices">Manage devices</a>
     % endif
     </div>
     </div>
@@ -40,10 +40,8 @@ Copyright (C) 2026 Alexandre Licinio
     <div class="card-header d-flex justify-content-between align-items-center">
     <strong>${d['name'] or 'StreamHub'} (${d['host']})</strong>
     <div class="small text-muted" style="display: none;">Last update: <span id="ts-${d['id']}">—</span></div>
-    <div class="d-flex align-items-center gap-2">
     <span class="badge text-bg-secondary" id="status-${d['id']}">loading…</span>
-    <span class="badge" id="slack-badge-${d['id']}"></span>
-    </div>
+    <span class="badge ms-1" id="slack-badge-${d['id']}"></span>
     </div>
     <div class="card-body">
     <div class="mt-2 mb-0" id="body-${d['id']}">—</div>
@@ -490,21 +488,16 @@ if (s){
                                                                                                                                                                                                                                                                                                          st.textContent = 'OK (Last update: ' + tstr + ')';
                                                                                                                                                                                                                                                                                                          st.className = 'badge text-bg-success';
                                                                                                                                                                                                                                                                                                          ts.textContent = tstr;
-                                                                                                                                                                                                                                                                                                         // Slack notification status badge
-                                                                                                                                                                                                                                                                                                         fetch('/slack_status?device_id=' + encodeURIComponent(id))
-                                                                                                                                                                                                                                                                                                           .then(function(r){return r.json();})
-                                                                                                                                                                                                                                                                                                           .then(function(sj){
-                                                                                                                                                                                                                                                                                                             var sb = document.getElementById('slack-badge-' + id);
-                                                                                                                                                                                                                                                                                                             if (!sb) return;
-                                                                                                                                                                                                                                                                                                             if (!sj.configured) { sb.textContent = ''; sb.className = 'badge'; return; }
-                                                                                                                                                                                                                                                                                                             if (sj.paused) {
-                                                                                                                                                                                                                                                                                                               sb.textContent = 'Slack OFF';
-                                                                                                                                                                                                                                                                                                               sb.className = 'badge text-bg-warning';
-                                                                                                                                                                                                                                                                                                             } else {
-                                                                                                                                                                                                                                                                                                               sb.textContent = 'Slack ON';
-                                                                                                                                                                                                                                                                                                               sb.className = 'badge text-bg-success';
-                                                                                                                                                                                                                                                                                                             }
-                                                                                                                                                                                                                                                                                                           }).catch(function(){});
+                                                                                                                                                                                                                                                                         // Slack badge
+                                                                                                                                                                                                                                                                         fetch('/slack_status?device_id=' + encodeURIComponent(id))
+                                                                                                                                                                                                                                                                           .then(function(r){return r.json();})
+                                                                                                                                                                                                                                                                           .then(function(sj){
+                                                                                                                                                                                                                                                                             var sb = document.getElementById('slack-badge-' + id);
+                                                                                                                                                                                                                                                                             if (!sb) return;
+                                                                                                                                                                                                                                                                             if (!sj.configured) { sb.textContent = ''; sb.className = 'badge'; return; }
+                                                                                                                                                                                                                                                                             if (sj.paused) { sb.textContent = 'Slack OFF'; sb.className = 'badge text-bg-warning'; }
+                                                                                                                                                                                                                                                                             else { sb.textContent = 'Slack ON'; sb.className = 'badge text-bg-success'; }
+                                                                                                                                                                                                                                                                           }).catch(function(){});
                                                                                                                                                                                                                                                                                                      } else {
                                                                                                                                                                                                                                                                                                          st.textContent = 'ERROR';
                                                                                                                                                                                                                                                                                                          st.className = 'badge text-bg-danger';

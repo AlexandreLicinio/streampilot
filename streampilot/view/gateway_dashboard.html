@@ -1,0 +1,354 @@
+<!--
+SPDX-License-Identifier: LGPL-2.1-or-later
+Copyright (C) 2026 Alexandre Licinio
+-->
+<%inherit file="base.html"/>
+<%block name="body">
+<div class="d-flex justify-content-between align-items-center mb-3 w-100">
+  <h1 class="h3 m-0">SRT Gateway</h1>
+  <div>
+    <a class="btn btn-outline-secondary me-2" href="/gateway_logs">Logs</a>
+    <a class="btn btn-outline-secondary me-2" href="/gateway_geoip">GeoIP</a>
+    <a class="btn btn-outline-secondary" href="/devices">Manage devices</a>
+  </div>
+</div>
+
+% if not srt_gateways:
+<div class="alert alert-warning">No SRT Gateway configured. <a href="/devices">Add one</a>.</div>
+% else:
+
+<ul class="nav nav-tabs mb-3" role="tablist" id="gwTabs">
+% for idx, g in enumerate(srt_gateways):
+  <li class="nav-item" role="presentation">
+    <button class="nav-link ${'active' if idx==0 else ''}" data-gw-host="${g['host']}"
+            id="tab-gw-${g['id']}" type="button" role="tab">
+      ${g['name']} <span class="small text-muted">(${g['host']})</span>
+      <span class="badge ms-1" id="gw-slack-badge-${g['id']}"></span>
+    </button>
+  </li>
+% endfor
+</ul>
+
+% for idx, g in enumerate(srt_gateways):
+<div class="gw-pane ${'d-none' if idx != 0 else ''}" id="pane-gw-${g['id']}" data-host="${g['host']}">
+  <div class="row g-3">
+    <!-- Routes table -->
+    <div class="col-lg-6">
+      <div class="card h-100">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span class="fw-semibold">Routes</span>
+          <span class="badge text-bg-secondary" id="badge-gw-${g['id']}">loading…</span>
+        </div>
+        <div class="card-body p-0">
+          <table class="table table-sm table-hover mb-0" id="tbl-gw-${g['id']}">
+            <thead class="table-light">
+              <tr>
+                <th>Route</th>
+                <th>State</th>
+                <th>Bitrate</th>
+                <th>RTT</th>
+                <th>Loss</th>
+                <th>Clients</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="tbody-gw-${g['id']}">
+              <tr><td colspan="7" class="text-center text-muted py-3">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <!-- Map -->
+    <div class="col-lg-6">
+      <div class="card h-100">
+        <div class="card-header fw-semibold">Route map</div>
+        <div class="card-body p-0">
+          <div id="map-gw-${g['id']}" style="height:350px;min-height:250px;"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <!-- Events -->
+  <div class="card mt-3">
+    <div class="card-header fw-semibold d-flex justify-content-between align-items-center">Events<span class="text-muted small">last 10 — <a href="/gateway_logs">view all</a></span></div>
+    <div class="card-body p-0">
+      <table class="table table-sm mb-0">
+        <thead class="table-light">
+          <tr><th>Local time</th><th>Date (UTC)</th><th>Time (UTC)</th><th>Route</th><th>Event</th><th>IP</th></tr>
+        </thead>
+        <tbody id="events-gw-${g['id']}">
+          <tr><td colspan="6" class="text-muted text-center">No events yet</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+% endfor
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+(function(){
+  // ── Tab switching ─────────────────────────────────────────────────────────
+  var tabs = document.querySelectorAll('#gwTabs button');
+  tabs.forEach(function(btn){
+    btn.addEventListener('click', function(){
+      tabs.forEach(function(b){ b.classList.remove('active'); });
+      document.querySelectorAll('.gw-pane').forEach(function(p){ p.classList.add('d-none'); });
+      btn.classList.add('active');
+      var host = btn.dataset.gwHost;
+      document.querySelectorAll('.gw-pane').forEach(function(p){
+        if(p.dataset.host === host) p.classList.remove('d-none');
+      });
+    });
+  });
+
+  // ── Map instances ─────────────────────────────────────────────────────────
+  var maps = {};
+  document.querySelectorAll('.gw-pane').forEach(function(pane){
+    var host = pane.dataset.host;
+    var mapId = 'map-gw-' + pane.id.replace('pane-gw-','');
+    var m = L.map(mapId, {zoomControl:true}).setView([20,0], 2);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution:'© OpenStreetMap', maxZoom:18
+    }).addTo(m);
+    maps[host] = {map: m, markers: {}, lines: {}};
+  });
+
+  // ── Events — fetched from DB ─────────────────────────────────────────────
+  function pollEvents(host, tbodyId){
+    fetch('/gateway_events?host=' + encodeURIComponent(host) + '&limit=10')
+      .then(function(r){ return r.json(); })
+      .then(function(data){
+        var tbody = document.getElementById(tbodyId);
+        if(!tbody || !data.ok) return;
+        var evs = data.events || [];
+        if(!evs.length){
+          tbody.innerHTML = '<tr><td colspan="6" class="text-muted text-center">No events yet</td></tr>';
+          return;
+        }
+        tbody.innerHTML = evs.map(function(e){
+          var type = e.type || '';
+          var badge;
+          if(type.indexOf('started') >= 0 || type.indexOf('connected') >= 0){
+            badge = '<span class="badge text-bg-success">' + type + '</span>';
+          } else if(type.indexOf('stopped') >= 0 || type.indexOf('disconnected') >= 0){
+            badge = '<span class="badge text-bg-danger">' + type + '</span>';
+          } else {
+            badge = '<span class="badge text-bg-secondary">' + type + '</span>';
+          }
+          var detail = e.detail ? '<span class="text-muted small ms-1">'+e.detail+'</span>' : '';
+          var ipCell = e.ip ? '<td class="font-monospace small">'+e.ip+'</td>' : '<td class="text-muted">—</td>';
+          var raw=e.ts||'', datePart='';
+          if(raw.length>=10){var d=raw.slice(0,10).split('-');datePart=d[2]+'/'+d[1]+'/'+d[0];}
+          var localStr='';
+          if(raw.length>=16){try{var ldt=new Date(raw.replace(' ','T')+'Z');
+            localStr=ldt.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+          }catch(_){}}
+          return '<tr><td class="text-muted small">'+localStr+'</td>'
+               + '<td class="text-muted small">'+datePart+'</td>'
+               + '<td class="text-muted small">'+raw.slice(11,19)+'</td>'
+               + '<td class="small">'+(e.route||'')+'</td>'
+               + '<td>'+badge+detail+'</td>'
+               + ipCell+'</tr>';
+        }).join('');
+      }).catch(function(){});
+  }
+
+  // ── Previous states for event detection ──────────────────────────────────
+  var retentionDays = parseInt(document.body.dataset.retentionDays || '30', 10);
+  var prevStates = {};   // host -> {routeId -> {state, clients}}
+
+  // ── Poll all active panes ─────────────────────────────────────────────────
+  function pollAll(){
+    document.querySelectorAll('.gw-pane:not(.d-none)').forEach(function(pane){
+      var host = pane.dataset.host;
+      var paneId = pane.id.replace('pane-gw-','');
+      fetch('/gateway_data?host=' + encodeURIComponent(host))
+        .then(function(r){ return r.json(); })
+        .then(function(data){ updatePane(host, paneId, data); })
+        .catch(function(){});
+    });
+  }
+
+  function updatePane(host, paneId, data){
+    var tbody   = document.getElementById('tbody-gw-' + paneId);
+    var badge   = document.getElementById('badge-gw-' + paneId);
+    var evTbody = document.getElementById('events-gw-' + paneId);
+    if(!tbody || !data.ok) return;
+
+    var routes = data.routes || [];
+    var running = routes.filter(function(r){ return r.state === 'running'; }).length;
+
+    badge.textContent = running + '/' + routes.length + ' running';
+    badge.className   = 'badge ' + (running > 0 ? 'text-bg-success' : 'text-bg-secondary');
+    fetch('/gateway_slack_status?host=' + encodeURIComponent(host))
+      .then(function(r){return r.json();})
+      .then(function(sj){
+        document.querySelectorAll('#gwTabs button').forEach(function(btn){
+          if(btn.dataset.gwHost !== host) return;
+          var gid = btn.id.replace('tab-gw-','');
+          var sb = document.getElementById('gw-slack-badge-' + gid);
+          if(!sb) return;
+          if(!sj.configured){ sb.textContent=''; sb.className='badge'; return; }
+          if(sj.paused){ sb.textContent='Slack OFF'; sb.className='badge text-bg-warning'; }
+          else { sb.textContent='Slack ON'; sb.className='badge text-bg-success'; }
+        });
+      }).catch(function(){});
+
+    if(!routes.length){
+      tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-3">No routes</td></tr>';
+      return;
+    }
+
+    var prev = prevStates[host] || {};
+    var html = '';
+    routes.forEach(function(r){
+      var state = r.state || 'idle';
+      var sbadge = state === 'running'
+        ? '<span class="badge text-bg-success">running</span>'
+        : '<span class="badge text-bg-secondary">idle</span>';
+      var src  = r.source || {};
+      var rtt  = src.rtt_ms  != null ? src.rtt_ms.toFixed(1)+' ms'  : '—';
+      var loss = src.loss_pct!= null ? src.loss_pct.toFixed(2)+'%'  : '—';
+      var br   = r.total_bitrate_mbps != null ? r.total_bitrate_mbps.toFixed(2)+' Mb/s' : '—';
+      var conns= r.active_connections || 0;
+
+      // Track state for prevStates only (events are persisted server-side)
+      prev[r.id] = {state: state, clients: conns};
+      var rcolor = routeColor(host, r.id);
+      var retDays = (r.oldest_sample_days != null)
+        ? Math.max(0, Math.round(retentionDays - r.oldest_sample_days)) : null;
+      var retBadge = retDays !== null
+        ? ('<span class="badge ms-1 '
+          + (retDays < 5 ? 'text-bg-danger' : retDays < 10 ? 'text-bg-warning' : 'text-bg-secondary')
+          + '" title="' + retDays + ' days of history remaining in retention window">'
+          + retDays + 'd</span>') : '';
+
+      html += '<tr>'
+        + '<td class="fw-semibold">'
+        + '<span style="display:inline-block;width:10px;height:10px;border-radius:50%;'
+        + 'background:' + rcolor + ';margin-right:6px;flex-shrink:0"></span>'
+        + r.name + retBadge + '</td>'
+        + '<td>' + sbadge + '</td>'
+        + '<td>' + br + '</td>'
+        + '<td>' + rtt + '</td>'
+        + '<td>' + loss + '</td>'
+        + '<td>' + conns + '</td>'
+        + '<td><a href="/gateway_route?host=' + encodeURIComponent(host)
+        + '&route_id=' + encodeURIComponent(r.id)
+        + '" class="btn btn-sm btn-outline-primary">Details</a></td>'
+        + '</tr>';
+    });
+    prevStates[host] = prev;
+    tbody.innerHTML = html;
+
+    pollEvents(host, 'events-gw-' + paneId);
+    updateMap(host, routes);
+  }
+
+  // GeoIP — DB only, via /geoip endpoint
+  // Single DB load — sync lookup
+  var geoDb={};
+  // Per-route color palette
+  var ROUTE_COLORS=['#ff007f','#00bfff','#ff6600','#00cc44','#cc00ff',
+                    '#ffcc00','#00cccc','#ff4444','#aabb00','#ff99cc'];
+  function routeColor(host,rid){
+    var h=0; for(var i=0;i<rid.length;i++) h=(h*31+rid.charCodeAt(i))&0xfffffff;
+    return ROUTE_COLORS[h%ROUTE_COLORS.length];
+  }
+  function geo(ip,cb){
+    if(!ip||ip==='0.0.0.0') return;
+    var g=geoDb[ip]; if(g) cb(g);
+  }
+  function loadGeoDb(onDone){
+    fetch('/geoip_all')
+      .then(function(r){return r.json();})
+      .then(function(d){ geoDb=d; if(onDone) onDone(); })
+      .catch(function(){ if(onDone) onDone(); });
+  }
+
+  // Haversine distance km
+  function haversine(lat1,lng1,lat2,lng2){
+    var R=6371,d2r=Math.PI/180;
+    var dLat=(lat2-lat1)*d2r,dLng=(lng2-lng1)*d2r;
+    var a=Math.sin(dLat/2)*Math.sin(dLat/2)+
+          Math.cos(lat1*d2r)*Math.cos(lat2*d2r)*
+          Math.sin(dLng/2)*Math.sin(dLng/2);
+    return Math.round(R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a)));
+  }
+
+  function updateMap(host, routes){
+    var mg = maps[host];
+    if(!mg) return;
+    var allLatLngs=[];
+
+    routes.forEach(function(r){
+      if(r.state!=='running') return;
+      var rcolor=routeColor(host,r.id);
+      var src=r.source||{};
+      var br=r.total_bitrate_mbps;
+
+      var srcIp=(src.mode==='caller'&&src.address&&src.address!=='0.0.0.0')?src.address:null;
+      (src.connections||[]).forEach(function(c){
+        if(!srcIp&&c.address&&c.address!=='0.0.0.0') srcIp=c.address;
+      });
+
+      (function(rid,rname,sip,sname,brMbps,col){
+        var gs=sip?geoDb[sip]:null;
+        if(gs){
+          allLatLngs.push([gs.lat,gs.lng]);
+          var mkey='src_'+rid;
+          if(!mg.markers[mkey])
+            mg.markers[mkey]=L.circleMarker([gs.lat,gs.lng],
+              {radius:10,color:col,fillColor:col,fillOpacity:0.9})
+              .addTo(mg.map)
+              .bindPopup('<b>'+rname+'</b><br>Source: '+(sname||sip)+'<br>'+(gs.label||''));
+        }
+        (r.destinations||[]).forEach(function(dst,di){
+          var clients=[];
+          (dst.connections||[]).forEach(function(c){
+            if(c.address&&c.address!=='0.0.0.0') clients.push(c);
+          });
+          if(!clients.length&&dst.address&&dst.address!=='0.0.0.0')
+            clients.push({address:dst.address,srtRoundTripTime:null});
+          clients.forEach(function(cl,ci){
+            var gc=geoDb[cl.address]; if(!gc) return;
+            allLatLngs.push([gc.lat,gc.lng]);
+            var ckey='cli_'+rid+'_'+di+'_'+ci;
+            if(!mg.markers[ckey])
+              mg.markers[ckey]=L.circleMarker([gc.lat,gc.lng],
+                {radius:8,color:col,fillColor:col,fillOpacity:0.9})
+                .addTo(mg.map)
+                .bindPopup('<b>'+cl.address+'</b><br>'+(gc.label||''));
+            if(gs){
+              var dist=haversine(gs.lat,gs.lng,gc.lat,gc.lng);
+              var pop='<b>'+rname+'</b><br>'
+                +(brMbps!=null?'Bitrate: '+brMbps.toFixed(2)+' Mb/s<br>':'')
+                +(cl.srtRoundTripTime!=null?'RTT: '+cl.srtRoundTripTime.toFixed(1)+' ms<br>':'')
+                +dist+' km';
+              var lkey='line_'+ckey;
+              if(mg.lines[lkey])
+                mg.lines[lkey].setLatLngs([[gs.lat,gs.lng],[gc.lat,gc.lng]]).setPopupContent(pop);
+              else
+                mg.lines[lkey]=L.polyline([[gs.lat,gs.lng],[gc.lat,gc.lng]],
+                  {color:col,weight:3,opacity:0.85}).addTo(mg.map).bindPopup(pop);
+            }
+          });
+        });
+      })(r.id,r.name,srcIp,src.name,br,rcolor);
+    });
+
+    if(allLatLngs.length>1)
+      try{ mg.map.fitBounds(allLatLngs,{padding:[30,30],maxZoom:10}); }catch(e){}
+  }
+
+  loadGeoDb(function(){
+    pollAll();
+    setInterval(pollAll, 2000);
+  });
+})();
+</script>
+% endif
+</%block>

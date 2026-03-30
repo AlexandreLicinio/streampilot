@@ -4,22 +4,83 @@ Copyright (C) 2026 Alexandre Licinio
 -->
 <%inherit file="base.html"/>
     <%block name="body">
-    <div class="d-flex align-items-center">
+    <div class="d-flex align-items-center mb-2">
       <h1 class="h3 m-0">Devices</h1>
-      <%
-      try:
-          _cnt = device_count
-      except:
-          _cnt = len(devices) if devices else 0
-      try:
-          _max = int(max_streamhub)
-      except:
-          import os as _os
-          _max = int((_os.getenv('MAX_STREAMHUB') or '1').strip() or '1')
-      if _max < 1:
-          _max = 1
-      %>
-      <span class="badge text-bg-primary ms-3">${_cnt}/${_max}</span>
+    </div>
+    <%
+    try:
+        _cnt = device_count
+    except:
+        _cnt = len(devices) if devices else 0
+    try:
+        _max = int(max_streamhub)
+    except:
+        import os as _os
+        _max = int((_os.getenv('MAX_STREAMHUB') or '1').strip() or '1')
+    if _max < 1:
+        _max = 1
+    ## SRT Gateway count — uses srt_gateways list passed from Python
+    import os as _os2
+    _gw_max_env = _os2.getenv('MAX_SRTGATEWAY') or ''
+    try:
+        _gw_max = int(_gw_max_env.strip()) if _gw_max_env.strip() else None
+    except Exception:
+        _gw_max = None
+    try:
+        _gw_cnt = len(srt_gateways) if srt_gateways else 0
+    except Exception:
+        _gw_cnt = 0
+    %>
+    <div class="row g-3 mb-4">
+      <div class="col-auto">
+        <div class="card border-primary">
+          <div class="card-body py-2 px-3 d-flex align-items-center gap-3">
+            <div>
+              <div class="small text-muted text-uppercase fw-semibold" style="font-size:.7rem;letter-spacing:.05em">Haivision StreamHub</div>
+              <div class="d-flex align-items-baseline gap-1">
+                <span class="fs-4 fw-bold text-primary">${_cnt}</span>
+                <span class="text-muted small">/ ${_max}</span>
+                % if _cnt >= _max:
+                <span class="badge text-bg-danger ms-1">Max reached</span>
+                % elif _cnt == 0:
+                <span class="badge text-bg-secondary ms-1">None configured</span>
+                % else:
+                <span class="badge text-bg-success ms-1">Active</span>
+                % endif
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="col-auto">
+        <div class="card border-info">
+          <div class="card-body py-2 px-3 d-flex align-items-center gap-3">
+            <div>
+              <div class="small text-muted text-uppercase fw-semibold" style="font-size:.7rem;letter-spacing:.05em">SRT Gateway</div>
+              <div class="d-flex align-items-baseline gap-1">
+                <span class="fs-4 fw-bold text-info">${_gw_cnt}</span>
+                % if _gw_max is not None:
+                <span class="text-muted small">/ ${_gw_max}</span>
+                % if _gw_cnt >= _gw_max:
+                <span class="badge text-bg-danger ms-1">Max reached</span>
+                % elif _gw_cnt == 0:
+                <span class="badge text-bg-secondary ms-1">None configured</span>
+                % else:
+                <span class="badge text-bg-success ms-1">Active</span>
+                % endif
+                % else:
+                <span class="text-muted small">/ unlimited</span>
+                % if _gw_cnt == 0:
+                <span class="badge text-bg-secondary ms-1">None configured</span>
+                % else:
+                <span class="badge text-bg-success ms-1">Active</span>
+                % endif
+                % endif
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
     <div class="row">
     <div class="col-lg-6">
@@ -88,6 +149,66 @@ Copyright (C) 2026 Alexandre Licinio
     </div>
     </div>
     </div>
+
+    <div class="row mt-4">
+      <div class="col-lg-6">
+        <form method="post" action="/gateway_add_device" class="card p-3 mb-4">
+          <h2 class="h5">Add Haivision SRT Gateway</h2>
+          <div class="mb-2">
+            <label class="form-label">Name</label>
+            <input class="form-control" name="name" placeholder="My SRT Gateway">
+          </div>
+          <div class="mb-2">
+            <label class="form-label">Protocol</label>
+            <select class="form-select" name="protocol">
+              <option value="https" selected>https</option>
+              <option value="http">http</option>
+            </select>
+          </div>
+          <div class="mb-2">
+            <label class="form-label">Host</label>
+            <input class="form-control" name="host" placeholder="IP or hostname">
+          </div>
+          <div class="mb-2">
+            <label class="form-label">Port</label>
+            <input class="form-control" name="port" value="443">
+          </div>
+          <div class="mb-2">
+            <label class="form-label">Username</label>
+            <input class="form-control" name="username" value="haiadmin">
+          </div>
+          <div class="mb-2">
+            <label class="form-label">Password</label>
+            <input class="form-control" name="password" type="password">
+          </div>
+          <button class="btn btn-primary">Add</button>
+        </form>
+      </div>
+      <div class="col-lg-6">
+        <div class="card p-3">
+          <h2 class="h5">Existing SRT Gateways</h2>
+          % if not srt_gateways:
+          <div class="text-muted">None yet.</div>
+          % else:
+          <ul class="list-group">
+          % for g in srt_gateways:
+          <li class="list-group-item d-flex justify-content-between align-items-center">
+            <div>
+              <strong>${g['name']}</strong>
+              <div class="small text-muted">${g['protocol']}://${g['host']}:${g['port']}</div>
+            </div>
+            <form method="post" action="/gateway_delete_device" onsubmit="return confirm('Delete this gateway?')">
+              <input type="hidden" name="id" value="${g['id']}"/>
+              <button class="btn btn-outline-danger btn-sm">Delete</button>
+            </form>
+          </li>
+          % endfor
+          </ul>
+          % endif
+        </div>
+      </div>
+    </div>
+
     <script>
     (function(){
      const proto = document.querySelector('select[name="protocol"]');

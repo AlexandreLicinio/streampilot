@@ -10,7 +10,7 @@
   </a>
 </p>
 
-**StreamPilot** is a web app for real‑time supervision and geo‑visualization (location) of **Haivision** transmitters. Stats from 4G/5G modems, ETH1‑2, Wi‑Fi and USB are recorded and displayed live during each session through several charts. You can use it during live production or site surveys to map precise coverage for public/private 4G/5G or any network interface (ETH1‑2, STARLINK, Wi‑Fi, USB) supported by the transmitter.
+**StreamPilot** is a web app for real‑time supervision and geo‑visualization (location) of **Haivision StreamHub** and connected **mobile video transmitters**. Stats from 4G/5G modems, ETH1‑2, Wi‑Fi and USB are recorded and displayed live during each session through several charts. You can use it during live production or site surveys to map precise coverage for public/private 4G/5G or any network interface (ETH1‑2, STARLINK, Wi‑Fi, USB) supported by the transmitter. It also supports the ** Haivision SRT Gateway** supervision with real-time stats, map, notifications and reports.
 Ideal for mobile broadcast: cycle tours, marathons, triathlons, remote production, and private 5G deployments.
 
 Raw data is provided by **Haivision StreamHub** via its REST API (HTTP/HTTPS). All network interfaces and GPS are monitored.
@@ -20,7 +20,7 @@ Also, it can provides powerfull pdf reports at the end of a live. The reports co
 
 ### What’s next for StreamPilot?
 
-Today, StreamHub’s REST API doesn’t expose every modem details (Band, Operator name, SNR, RSSI, priority). The goal is for **StreamPilot** to actively **pilot each modem**, switching live to the best interface(s). This would raise transmission quality by automatically managing interface priorities.
+Today, StreamHub’s REST API doesn’t expose every modem details (Band, Operator name, SNR, RSSI, priority). The goal is for **StreamPilot** to actively **pilot each modem**, switching live to the best interface(s). This would raise transmission quality by automatically managing interface priorities. Also I will be very happy to support all the great brands in bonding video mobile transmetters, such as LiveU, TVU, Vislink and Dejero.
 
 ### Why StreamPilot?
 
@@ -30,9 +30,16 @@ Just because I needed a tool for site surveys and live production in my company 
 
 ### Roadmap
 
+- [x] Haivision StreamHub
 - [x] Haivision SST transmitters
+- [x] Haivision SRT Gateway
 - [x] Slack notifications
+- [x] PDF reports
 - [ ] Modem and priority control (requires deeper API access from Haivision)
+- [ ] LiveU mobile video transmitters, please contribute or allow demo access :)
+- [ ] TVU mobile video transmitters, please contribute or allow demo access :)
+- [ ] Vislink mobile video transmitters, please contribute or allow demo access :)
+- [ ] Dejero mobile video transmitters, please contribute or allow demo access :)
 
 ---
 
@@ -69,7 +76,7 @@ Set the listening port (example: 5555) and start the server from the project roo
 ### Dev / LAN (self-hosted):
 
 ```bash
-bin/python -m streampilot -port 5555 -name "John Dear" -max_streamhubs 4 -user 'admin' -password 'password'
+bin/python -m streampilot -port 5555 -name "John Dear" -max_streamhubs 4  -max_srtgateway 2 -user 'admin' -password 'password'
 ```
 
 ### Behind Nginx in HTTPS (proxy):
@@ -88,7 +95,7 @@ location / {
 ```
 
 ```bash
-bin/python -m streampilot -port 5555 -name "John Dear" -max_streamhubs 4 -user 'admin' -password 'password' -mode proxy
+bin/python -m streampilot -port 5555 -name "John Dear" -max_streamhubs 4 -max_srtgateway 2 -user 'admin' -password 'password' -mode proxy
 ```
 
 You can also specify port, name, max_streamhubs thru the following environment variables:
@@ -99,12 +106,14 @@ You can also specify port, name, max_streamhubs thru the following environment v
 > - `-user`: Username for the login portal (default: admin)
 > - `-password`: Password for the login portal (default: admin)
 > - `-mode`: If working behind a Nginx, hosting HTTPS certificates (default: proxy)
+> - `-max_srtgateway`: Maximum number of SRT Gateway devices (default: unlimited)
+> - `-srt_retention_days`: Sample retention in days for SRT Gateway (default: 30)
 
 The app will be available at [http://localhost:5555](http://localhost:5555).
 
 ---
 
-## Usage
+## Usage with Haivision StreamHub
 
 <p align="center">
   <img src="streamhub_login_page.png" alt="StreamHub login page" width="700"/>
@@ -209,9 +218,32 @@ All the logs from the StreamHub are sorted per transmitter (input) and displayed
 
 ---
 
-## Haivision:
+## Usage with Haivision SRT Gateway
 
-StreamHub is the main data and stats collector for all transmitters. Here are the data and stats actually provided by the api (in REST).
+A completely new section of the product. A dedicated poller (SRTGatewayPoller) queries the REST API of configured Haivision SRT Gateway devices and normalizes the data through srt_gateway.py.
+
+SRT Gateway dashboard — table of all routes with state, bitrate in/out, RTT, loss, active client count, sample retention badge (days remaining before purge), and per-route Slack alerts.
+
+### Route detail page — 5 tabs:
+
+* Source: static config + live metrics + SRT version when available + incoming connections table
+* Destinations: config merged with live stats, clients listed with bitrate/RTT/loss/SRT version per client, for both Listener and Caller modes
+* Events: connection/disconnection log with local time (browser timezone) and UTC
+* Map: GeoIP geolocation of source and client IPs on an interactive Leaflet map
+* Reports: manual Start/Stop report sessions, archived reports list
+
+### PDF reports — generated by reportlab, per report session:
+
+* Bitrate / RTT / loss graphs for the source and each client
+* Adaptive time axis (1/5/10/15/30/60 min depending on duration) with local time in blue + UTC in grey
+* Gap detection: no false connecting line when a client was disconnected
+* Dual-timezone events table
+
+---
+
+## data not present in the haivision streamhub api:
+
+**StreamHub** is the main data and stats collector for all transmitters. Here are the data and stats actually provided by the api (in REST).
 
 | endpoint        | api                |
 | ----------------|:------------------:|
@@ -221,12 +253,16 @@ StreamHub is the main data and stats collector for all transmitters. Here are th
 | RTT             | OK                 |
 | loss            | OK                 |
 | lost packets    | OK                 |
-| mobile operator | NOK                |
-| 4G/5G band      | NOK                |
-| 3G/4G/5G        | NOK                |
-| snr             | NOK                |
-| rssi            | NOK                |
-| priority        | NOK                |
+| mobile operator | Not in api         |
+| 4G/5G band      | Not in api         |
+| 3G/4G/5G        | Not in api         |
+| snr             | Not in api         |
+| rssi            | Not in api         |
+| priority        | Not in api         |
+
+---
+
+## Supported firmwares:
 
 **StreamPilot** is OKAY with theses firmwares:
 
@@ -237,10 +273,13 @@ StreamHub is the main data and stats collector for all transmitters. Here are th
 | rack400       | 4.2.0              |
 | rack2-3       | 6.2.0              |
 | PRO3 series   | 6.2.0              |
+| SRT Gateway   | 4.0.2              |
 
 ---
 
 ## Features
+
+### Haivision StreamHub:
 
 - **Supervision** of Haivision StreamHub transmitters over the SST protocol
 - **Real‑time geolocation** of SST inputs on an interactive map
@@ -260,13 +299,22 @@ StreamHub is the main data and stats collector for all transmitters. Here are th
 - **Responsive dashboard** (Bootstrap 5)
 - **Notifications slack** via webhook
 
----
-
-## Monitoring & integrations
+### Monitoring & integrations for Haivision StreamHub:
 
 - **/health**: poller state, sessions, sample ages
 - **/health_json**: external monitoring (JSON)
 - **/metrics**: Prometheus endpoint for Grafana/Prometheus
+
+### Haivision SRT Gateway:
+
+- Multi-device SRT Gateway polling via REST API
+- Live route dashboard: state, bitrate in/out, RTT, loss, active clients
+- Per-route detail: source, destinations (Listener/Caller), clients, live chart
+- Manual report sessions with PDF export (graphs + events, dual timezone)
+- Events log with local time and UTC columns
+- GeoIP map of source and client IPs
+- Retention badge per route with automatic sample purge
+- Slack alerts per route and configurable alerts
 
 ---
 

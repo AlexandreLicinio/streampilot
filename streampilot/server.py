@@ -11,11 +11,13 @@ if str(PROJECT_ROOT) not in sys.path:
 import base64, hashlib as _hl
 from datetime import datetime as _dt, timedelta as _td, timezone as _tz
     
+import json, html as _html
 import os, time, sqlite3, cherrypy
 import hashlib, secrets, functools
 import threading
 import random
 from collections import deque
+from typing import Optional
 from mako.lookup import TemplateLookup
 from collect.scripts.streamhub import fetch_streamhub
 try:
@@ -337,8 +339,9 @@ class BackgroundPoller:
                             if last_ts:
                                 from datetime import datetime
                                 try:
-                                    dt = datetime.fromisoformat(str(last_ts)[:19])
-                                    age_sec = max(0, int((datetime.now() - dt).total_seconds()))
+                                    _ts_str = str(last_ts)[:19].replace('T', ' ')
+                                    dt = datetime.strptime(_ts_str, '%Y-%m-%d %H:%M:%S')
+                                    age_sec = max(0, int((datetime.utcnow() - dt).total_seconds()))
                                 except Exception:
                                     age_sec = None
                             dq = self.age_history.get(host)
@@ -401,11 +404,14 @@ def _filter_logs_for_input(rows, input_index, input_identifier, device_id=None):
     """Filter StreamHub log rows for a specific session input.
     Includes:
     - Source #N / input N logs matching this input (1-indexed)
-    - IP output logs whose output name is linked to this input
+    - IP output logs whose output name is linked to this input,
+      AND whose message does not explicitly reference a different input number
     - Logs mentioning the input_identifier
     Excludes:
     - Config change (global noise)
     - Source #N / input N logs belonging to other inputs
+    - IP output logs that explicitly say (input N) where N != this input,
+      OR that say (input AUTO) — AUTO outputs are not input-specific
     """
     import re as _re2
     _PAT_SRC = _re2.compile(
@@ -417,6 +423,8 @@ def _filter_logs_for_input(rows, input_index, input_identifier, device_id=None):
         r"(?:ip output|sdi output|ndi output)[\s'\"]+([\w\-\.]+)",
         _re2.IGNORECASE
     )
+    # Extracts the (input N) or (input AUTO) annotation from IP output messages
+    _PAT_INPUT_TAG = _re2.compile(r'\(input\s+(\d+|AUTO)\)', _re2.IGNORECASE)
     _EXCLUDE = _re2.compile(
         r'^config change',
         _re2.IGNORECASE
@@ -446,6 +454,22 @@ def _filter_logs_for_input(rows, input_index, input_identifier, device_id=None):
             # Normalise SDI log: "SDI output 1" captured as "1" → "sdi-1"
             if msg_lower.startswith('sdi output') and out_name.isdigit():
                 out_name = f'sdi-{out_name}'
+            # Check if message explicitly tags an input number or AUTO
+            m_tag = _PAT_INPUT_TAG.search(msg)
+            if m_tag:
+                tag_val = m_tag.group(1).upper()
+                if tag_val == 'AUTO':
+                    # AUTO outputs follow any active input — skip entirely,
+                    # they are not specific to this session's input
+                    continue
+                elif idx_str and tag_val != idx_str:
+                    # Explicitly belongs to a different input
+                    continue
+                else:
+                    # Tag matches this input — include regardless of linked_outputs
+                    result.append(row)
+                    continue
+            # No explicit tag — fall back to linked_outputs mapping
             if linked_outputs and out_name in linked_outputs:
                 result.append(row)
             # else: output not linked to this input, skip
@@ -458,8 +482,9 @@ def _filter_logs_for_input(rows, input_index, input_identifier, device_id=None):
 
 def _persist_output_map(host: str, payload: dict):
     """Persist the input→output name mapping from the current payload.
-    Uses INSERT OR REPLACE so it stays up to date every poll cycle.
+    Uses INSERT OR REPLACE so historical entries are preserved for past session filtering.
     ip_outputs keys are 0-indexed in payload; input_index in DB is 1-indexed.
+    Only persists outputs that are currently active (status='on').
     """
     if not payload or not host:
         return
@@ -471,11 +496,11 @@ def _persist_output_map(host: str, payload: dict):
                 continue
             # payload key is 0-indexed; store as 1-indexed to match Source #N
             input_idx_1 = int(key) + 1
-            # IP outputs
+            # IP outputs — only active ones (status='on')
             ip_outputs = (inp or {}).get('ip_outputs') or {}
             for out in ip_outputs.values():
                 name = (out or {}).get('name')
-                if name:
+                if name and (out or {}).get('status') == 'on':
                     rows.append((host, input_idx_1, str(name).lower()))
             # SDI (physical) outputs
             sdi_outputs = (inp or {}).get('sdi_outputs') or {}
@@ -501,16 +526,15 @@ def _persist_output_map(host: str, payload: dict):
             pass
 
 
-def connect_db():
+def _init_db():
+    """Run once at startup — creates tables, indexes, runs migrations."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    # isolation_level=None => autocommit explicite, utile pour WAL
-    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False, isolation_level=None, timeout=2.0)
-    # PRAGMA de perf / robustesse
+    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False, isolation_level=None, timeout=10.0)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.execute("PRAGMA busy_timeout=2000;")
+    conn.execute("PRAGMA busy_timeout=5000;")
     conn.execute("PRAGMA temp_store=MEMORY;")
-    conn.execute("PRAGMA cache_size=-20000;")  # ~20Mo
+    conn.execute("PRAGMA cache_size=-20000;")
     # Schéma minimal (tel que déjà en place chez toi)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS devices ("
@@ -548,6 +572,88 @@ def connect_db():
             PRIMARY KEY (device_host, output_name)
         )""")
 
+    # SRT Gateway tables
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS srt_gateway_device (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT,
+            host        TEXT UNIQUE,
+            port        INTEGER DEFAULT 443,
+            protocol    TEXT DEFAULT 'https',
+            username    TEXT DEFAULT 'haiadmin',
+            password    TEXT DEFAULT 'haiadmin',
+            gw_device_id TEXT,
+            session_id  TEXT
+        )""")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS srt_route_sample (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_host TEXT NOT NULL,
+            route_id    TEXT NOT NULL,
+            route_name  TEXT,
+            ts          TEXT,
+            state       TEXT,
+            total_bitrate_mbps REAL,
+            src_rtt_ms  REAL,
+            src_loss_pct REAL,
+            src_retransmit_bps REAL,
+            active_connections INTEGER
+        )""")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS srt_connection_sample (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_host TEXT NOT NULL,
+            route_id    TEXT NOT NULL,
+            ts          TEXT,
+            direction   TEXT,
+            address     TEXT,
+            port        INTEGER,
+            bitrate_mbps REAL,
+            rtt_ms      REAL,
+            loss_pct    REAL,
+            retransmit_bps REAL,
+            buffer_ms   REAL,
+            state       TEXT,
+            srt_version TEXT
+        )""")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS srt_session (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_host TEXT NOT NULL,
+            route_id    TEXT NOT NULL,
+            route_name  TEXT,
+            started_at  TEXT,
+            ended_at    TEXT
+        )""")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS srt_endpoint_location (
+            address     TEXT PRIMARY KEY,
+            label       TEXT,
+            lat         REAL,
+            lng         REAL
+        )""")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS srt_event (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_host TEXT NOT NULL,
+            route_id    TEXT,
+            route_name  TEXT,
+            ts          TEXT,
+            event_type  TEXT,
+            detail      TEXT,
+            ip_address  TEXT
+        )""")
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_srt_route_sample ON srt_route_sample(device_host, route_id, ts)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_srt_conn_sample ON srt_connection_sample(device_host, route_id, ts)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_srt_event ON srt_event(device_host, ts)")
+    except Exception: pass
+    try:
+        _ec2 = {r[1] for r in conn.execute("PRAGMA table_info(srt_event)").fetchall()}
+        if "ip_address" not in _ec2:
+            conn.execute("ALTER TABLE srt_event ADD COLUMN ip_address TEXT")
+    except Exception: pass
+
     # Slack global config
     conn.execute("""
         CREATE TABLE IF NOT EXISTS slack_config (
@@ -584,7 +690,107 @@ def connect_db():
         if "notify_connection" not in _ec:
             conn.execute("ALTER TABLE device_slack ADD COLUMN notify_connection INTEGER DEFAULT 1")
     except Exception: pass
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS srt_gw_slack (
+            gw_id            INTEGER PRIMARY KEY,
+            notify_source    INTEGER DEFAULT 1,
+            notify_client    INTEGER DEFAULT 1,
+            notify_paused    INTEGER DEFAULT 0,
+            thr_bitrate_min  REAL    DEFAULT 0,
+            thr_loss_max     REAL    DEFAULT 0,
+            thr_lost_max     INTEGER DEFAULT 0,
+            thr_dropped_max  INTEGER DEFAULT 0,
+            thr_retransmit_max REAL  DEFAULT 0
+        )""")
+    try:
+        _gwc = {r[1] for r in conn.execute("PRAGMA table_info(srt_gateway_device)").fetchall()}
+        if "session_id" not in _gwc:
+            conn.execute("ALTER TABLE srt_gateway_device ADD COLUMN session_id TEXT")
+    except Exception: pass
 
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS srt_report_session (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_host TEXT NOT NULL,
+            route_id    TEXT NOT NULL,
+            route_name  TEXT,
+            name        TEXT,
+            started_at  TEXT NOT NULL,
+            ended_at    TEXT NOT NULL,
+            created_at  TEXT
+        )""")
+    conn.commit()
+    conn.close()
+
+
+def connect_db():
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False, isolation_level=None, timeout=5.0)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA busy_timeout=2000;")
+    conn.execute("PRAGMA temp_store=MEMORY;")
+    conn.execute("PRAGMA cache_size=-20000;")
+    # Ensure critical tables always exist (idempotent, fast after first run)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS devices ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " name TEXT, protocol TEXT, host TEXT, port INTEGER, api_path TEXT, token TEXT)"
+    )
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS device_output_map (
+            device_host  TEXT NOT NULL,
+            input_index  INTEGER NOT NULL,
+            output_name  TEXT NOT NULL,
+            PRIMARY KEY (device_host, output_name)
+        )""")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS srt_report_session (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_host TEXT NOT NULL,
+            route_id    TEXT NOT NULL,
+            route_name  TEXT,
+            name        TEXT,
+            started_at  TEXT NOT NULL,
+            ended_at    TEXT NOT NULL,
+            created_at  TEXT,
+            tz_offset   INTEGER DEFAULT 0
+        )""")
+    # Migration: add tz_offset if missing (existing DBs)
+    try:
+        conn.execute('ALTER TABLE srt_report_session ADD COLUMN tz_offset INTEGER DEFAULT 0')
+    except Exception: pass
+    try:
+        conn.execute('ALTER TABLE srt_connection_sample ADD COLUMN srt_version TEXT')
+    except Exception: pass
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS streamhub_log (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_host TEXT NOT NULL,
+            ts      TEXT,
+            node    TEXT,
+            level   TEXT,
+            message TEXT,
+            raw     TEXT,
+            fp      TEXT
+        )""")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS device_slack ("
+        "device_id INTEGER PRIMARY KEY,"
+        "notify_session INTEGER DEFAULT 1,"
+        "notify_drops INTEGER DEFAULT 1,"
+        "notify_owd_threshold INTEGER DEFAULT 0,"
+        "notify_bitrate_min INTEGER DEFAULT 0,"
+        "notify_poller_error INTEGER DEFAULT 1,"
+        "notify_logs INTEGER DEFAULT 1,"
+        "notify_connection INTEGER DEFAULT 1,"
+        "notify_paused INTEGER DEFAULT 0,"
+        "ignore_contains TEXT DEFAULT '[]')"
+    )
+    try:
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_shlog_fp ON streamhub_log(fp)")
+    except Exception: pass
+    _ensure_db_indexes(conn)
     return conn
 
 def _persist_logs(host: str, entries: list):
@@ -625,6 +831,35 @@ def render(tpl, **ctx):
     return lookup.get_template(tpl).render(**ctx)
 
 
+
+def _gw_page(title: str, body_content: str, user=None) -> bytes:
+    """Minimal HTML wrapper for SRT Gateway pages (no Mako dependency)."""
+    u = (user or {}).get('username', '')
+    return (
+        "<!doctype html><html><head>"
+        "<meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<link href='https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css' rel='stylesheet'>"
+        "<title>" + title + " — StreamPilot</title>"
+        "</head><body>"
+        "<nav class='navbar navbar-expand-lg bg-body-tertiary border-bottom mb-3'>"
+        "<div class='container-fluid'>"
+        "<a class='navbar-brand fw-bold' href='/'>StreamPilot</a>"
+        "<div class='collapse navbar-collapse'>"
+        "<ul class='navbar-nav me-auto'>"
+        "<li class='nav-item'><a class='nav-link' href='/'>Dashboard</a></li>"
+        "<li class='nav-item'><a class='nav-link' href='/devices'>Devices</a></li>"
+        "<li class='nav-item'><a class='nav-link' href='/health'>Health</a></li>"
+        "<li class='nav-item'><a class='nav-link' href='/settings'>Settings</a></li>"
+        "<li class='nav-item'><a class='nav-link active' href='/gateway_dashboard'>SRT Gateway</a></li>"
+        "</ul>"
+        "<div class='ms-auto d-flex align-items-center gap-2'>"
+        + ("<span class='badge text-bg-secondary'>" + u + "</span>" if u else "")
+        + "<a class='btn btn-outline-secondary btn-sm' href='/logout'>Logout</a>"
+        "</div></div></div></nav>"
+        + body_content
+        + "<script src='https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js'></script>"
+        "</body></html>"
+    ).encode('utf-8')
 
 
 def _license_is_valid():
@@ -676,6 +911,491 @@ def slow(th=0.25):  # log > 250 ms
             return r
         return wrap
     return deco
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SRT Gateway Poller
+# ══════════════════════════════════════════════════════════════════════════════
+
+class SRTGatewayPoller:
+    """Background poller for Haivision SRT/Media Gateway devices."""
+
+    def __init__(self, db_path, interval: int = 5):
+        self.db_path  = db_path
+        self.interval = interval
+        self._thr     = None
+        self._stop    = False
+        self._sessions: dict  = {}   # host -> {route_id -> session_id}
+        self._last_states: dict = {} # host -> {route_id -> state}
+        self._session_ids: dict = {} # host -> sessionID cookie
+        self._gw_device_ids: dict = {}  # host -> gw_device_id
+        self._slack_initialized: set = set()
+        self.alert_state: dict = {}
+        self.last_payloads: dict = {}  # host -> {route_id -> normalized}
+        self.age_history: dict = {}    # host -> deque[(ts, age_sec)]
+
+    def start(self):
+        import threading
+        self._stop = False
+        self._thr  = threading.Thread(target=self._loop, daemon=True)
+        self._thr.start()
+
+    def stop(self):
+        self._stop = True
+
+    def _loop(self):
+        _last_purge = 0.0
+        while not self._stop:
+            t0 = time.time()
+            try:
+                self._poll_all()
+            except Exception as e:
+                cherrypy.log(f'[srt_gw] loop error: {e}')
+            # Purge old samples once per hour
+            if t0 - _last_purge > 3600:
+                try:
+                    self._purge_old_samples()
+                    _last_purge = t0
+                except Exception as _pe:
+                    cherrypy.log(f'[srt_gw] purge error: {_pe}')
+            elapsed = time.time() - t0
+            sleep = max(0, self.interval - elapsed)
+            time.sleep(sleep)
+
+    def _purge_old_samples(self):
+        """Delete srt_route_sample and srt_connection_sample older than SRT_RETENTION_DAYS."""
+        try:
+            days = int(os.getenv('SRT_RETENTION_DAYS') or 30)
+        except Exception:
+            days = 30
+        from datetime import datetime as _dtp, timedelta as _tdd
+        cutoff = (_dtp.utcnow() - _tdd(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+        with connect_db() as c:
+            c.execute('DELETE FROM srt_route_sample WHERE ts < ?', (cutoff,))
+            c.execute('DELETE FROM srt_connection_sample WHERE ts < ?', (cutoff,))
+        cherrypy.log(f'[srt_gw] purged samples older than {days} days (cutoff {cutoff})')
+
+    def _poll_all(self):
+        with connect_db() as c:
+            devices = c.execute(
+                'SELECT id, name, host, port, protocol, username, password, gw_device_id '
+                'FROM srt_gateway_device'
+            ).fetchall()
+        for row in devices:
+            did, name, host, port, proto, user, pwd, gw_id = row
+            base = f'{proto}://{host}:{port}'
+            try:
+                self._poll_device(did, name, host, base, user, pwd, gw_id)
+            except Exception as e:
+                cherrypy.log(f'[srt_gw] {host} error: {e}')
+
+    def _get_session(self, host: str, base: str, user: str, pwd: str) -> Optional[str]:
+        """Return valid sessionID.
+        Priority: 1) in-memory cache, 2) persisted in DB, 3) fresh login.
+        Persisting the sessionID across restarts avoids hitting the
+        max-concurrent-sessions limit (HTTP 429) on the gateway.
+        """
+        from collect.scripts.srt_gateway import login, logout
+        # 1. In-memory cache
+        sid = self._session_ids.get(host)
+        if sid:
+            return sid
+        # 2. Persisted in DB from previous run
+        try:
+            with connect_db() as c:
+                row = c.execute(
+                    "SELECT session_id FROM srt_gateway_device WHERE host=?", (host,)
+                ).fetchone()
+                if row and row[0]:
+                    sid = row[0]
+                    self._session_ids[host] = sid
+                    cherrypy.log(f'[srt_gw] {host} restored session from DB')
+                    return sid
+        except Exception:
+            pass
+        # 3. Fresh login
+        sid = login(base, user, pwd)
+        if sid:
+            self._session_ids[host] = sid
+            # Persist so next restart reuses this session
+            try:
+                with connect_db() as c:
+                    c.execute(
+                        "UPDATE srt_gateway_device SET session_id=? WHERE host=?",
+                        (sid, host)
+                    )
+            except Exception:
+                pass
+            cherrypy.log(f'[srt_gw] {host} logged in, session persisted')
+        return sid
+
+    def _poll_device(self, did, name, host, base, user, pwd, gw_id):
+        from collect.scripts.srt_gateway import (
+            login, fetch_device_id, fetch_routes, fetch_route_stats, normalize_route
+        )
+        sid = self._get_session(host, base, user, pwd)
+        if not sid:
+            # Clear any stale persisted session
+            try:
+                with connect_db() as c:
+                    c.execute("UPDATE srt_gateway_device SET session_id=NULL WHERE host=?", (host,))
+            except Exception:
+                pass
+            cherrypy.log(f'[srt_gw] {host} login failed')
+            return
+
+        # Resolve gateway device_id if not cached
+        if not gw_id:
+            ok, gw_id = fetch_device_id(base, sid)
+            if ok and gw_id:
+                with connect_db() as c:
+                    c.execute('UPDATE srt_gateway_device SET gw_device_id=? WHERE host=?',
+                              (gw_id, host))
+                self._gw_device_ids[host] = gw_id
+            else:
+                self._session_ids.pop(host, None)
+                return
+
+        ok, routes = fetch_routes(base, sid, gw_id)
+        if not ok:
+            # Session likely expired — clear from memory and DB, re-login next cycle
+            self._session_ids.pop(host, None)
+            try:
+                with connect_db() as c:
+                    c.execute("UPDATE srt_gateway_device SET session_id=NULL WHERE host=?", (host,))
+            except Exception:
+                pass
+            return
+
+        ts = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())
+        normalized = {}
+        for route in routes:
+            route_id = route.get('id', '')
+            ok_s, stats = fetch_route_stats(base, sid, gw_id, route_id)
+            payload = normalize_route(route, stats if ok_s else {})
+            normalized[route_id] = payload
+            self._persist_sample(host, ts, payload)
+            self._track_session(host, ts, payload)
+
+        self.last_payloads[host] = normalized
+        self._update_age_history(host)
+
+        # Slack alerts
+        slack_cfg = self._load_slack_cfg()
+        if slack_cfg:
+            self._notify_gateway(host, name, normalized, slack_cfg)
+
+    def _persist_sample(self, host: str, ts: str, p: dict):
+        src = p.get('source', {})
+        with connect_db() as c:
+            c.execute(
+                'INSERT INTO srt_route_sample '
+                '(device_host, route_id, route_name, ts, state, total_bitrate_mbps, '
+                'src_rtt_ms, src_loss_pct, src_retransmit_bps, active_connections) '
+                'VALUES (?,?,?,?,?,?,?,?,?,?)',
+                (host, p['id'], p['name'], ts, p.get('state'),
+                 p.get('total_bitrate_mbps'),
+                 src.get('rtt_ms'), src.get('loss_pct'),
+                 src.get('retransmit_bps'), p.get('active_connections', 0))
+            )
+            # Per-connection samples
+            for conn in src.get('connections', []):
+                c.execute(
+                    'INSERT INTO srt_connection_sample '
+                    '(device_host, route_id, ts, direction, address, port, '
+                    'bitrate_mbps, rtt_ms, loss_pct, retransmit_bps, buffer_ms, state, srt_version) '
+                    'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (host, p['id'], ts, 'source',
+                     conn.get('address'), conn.get('port'),
+                     conn.get('bitrate_mbps'), conn.get('rtt_ms'),
+                     conn.get('loss_pct'), conn.get('retransmit_bps'),
+                     conn.get('buffer_ms'), conn.get('state'),
+                     conn.get('srt_version', ''))
+                )
+            for dst in p.get('destinations', []):
+                for conn in dst.get('connections', []):
+                    c.execute(
+                        'INSERT INTO srt_connection_sample '
+                        '(device_host, route_id, ts, direction, address, port, '
+                        'bitrate_mbps, rtt_ms, loss_pct, retransmit_bps, buffer_ms, state, srt_version) '
+                        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                        (host, p['id'], ts, f"dst:{dst.get('name','')}",
+                         conn.get('address'), conn.get('port'),
+                         conn.get('bitrate_mbps'), conn.get('rtt_ms'),
+                         conn.get('loss_pct'), None, None, conn.get('state'),
+                         conn.get('srt_version', ''))
+                    )
+
+    def _update_age_history(self, host: str):
+        """Record sample age (seconds since last sample) for sparkline."""
+        from collections import deque
+        from datetime import datetime as _dth
+        try:
+            with connect_db() as c:
+                r = c.execute(
+                    "SELECT MAX(ts) FROM srt_route_sample WHERE device_host=?", (host,)
+                ).fetchone()[0]
+            if r:
+                dt = _dth.strptime(str(r)[:19], "%Y-%m-%d %H:%M:%S")
+                age = max(0, int((_dth.utcnow() - dt).total_seconds()))
+            else:
+                age = None
+            if host not in self.age_history:
+                self.age_history[host] = deque(maxlen=120)
+            self.age_history[host].append((time.time(), age))
+        except Exception:
+            pass
+
+    def _persist_event(self, host, ts, route_id, route_name, event_type,
+                        detail='', ip_address=None):
+        try:
+            with connect_db() as c:
+                c.execute(
+                    'INSERT INTO srt_event '
+                    '(device_host, route_id, route_name, ts, event_type, detail, ip_address) '
+                    'VALUES (?,?,?,?,?,?,?)',
+                    (host, route_id, route_name, ts, event_type, detail, ip_address)
+                )
+        except Exception:
+            pass
+
+    def _track_session(self, host: str, ts: str, p: dict):
+        """Detect route running/idle transitions and client count changes."""
+        route_id   = p['id']
+        route_name = p.get('name', route_id)
+        state      = p.get('state', 'idle')
+        conns      = p.get('active_connections', 0)
+        prev       = self._last_states.setdefault(host, {}).get(route_id)
+        prev_conns = self._last_states[host].get(route_id + '__conns')
+        if prev != state:
+            with connect_db() as c:
+                if state == 'running':
+                    c.execute(
+                        'INSERT INTO srt_session (device_host, route_id, route_name, started_at) '
+                        'VALUES (?,?,?,?)', (host, route_id, route_name, ts)
+                    )
+                elif state == 'idle' and prev == 'running':
+                    c.execute(
+                        'UPDATE srt_session SET ended_at=? '
+                        'WHERE device_host=? AND route_id=? AND ended_at IS NULL',
+                        (ts, host, route_id)
+                    )
+            if prev is not None:
+                self._persist_event(host, ts, route_id, route_name,
+                    'Route started' if state == 'running' else 'Route stopped')
+            self._last_states[host][route_id] = state
+        # Client connect/disconnect — track per-IP
+        curr_ips = set()
+        for dst in p.get('destinations', []):
+            for conn in dst.get('connections', []):
+                addr = conn.get('address')
+                if addr:
+                    curr_ips.add(addr)
+        prev_ips = self._last_states[host].get(route_id + '__ips', None)
+        if prev_ips is not None:
+            for ip in curr_ips - prev_ips:
+                self._persist_event(host, ts, route_id, route_name,
+                    'Client connected', str(len(curr_ips)) + ' total', ip_address=ip)
+            for ip in prev_ips - curr_ips:
+                self._persist_event(host, ts, route_id, route_name,
+                    'Client disconnected', str(len(curr_ips)) + ' remaining', ip_address=ip)
+        elif prev_conns is not None and conns != prev_conns:
+            # Fallback if IP tracking not yet available
+            if conns > prev_conns:
+                self._persist_event(host, ts, route_id, route_name,
+                    'Client connected', str(conns) + ' total')
+            else:
+                self._persist_event(host, ts, route_id, route_name,
+                    'Client disconnected', str(conns) + ' remaining')
+        self._last_states[host][route_id + '__ips'] = curr_ips
+        self._last_states[host][route_id + '__conns'] = conns
+
+    def _load_slack_cfg(self):
+        try:
+            with connect_db() as c:
+                r = c.execute('SELECT webhook_url, channel, username FROM slack_config WHERE id=1').fetchone()
+                if r and r[0] and r[0].strip():
+                    return r
+        except Exception: pass
+        return None
+
+    def _load_gw_slack(self, gw_id: int) -> dict:
+        try:
+            with connect_db() as c:
+                c.execute("INSERT OR IGNORE INTO srt_gw_slack(gw_id) VALUES(?)", (gw_id,))
+                r = c.execute("SELECT notify_source,notify_client,notify_paused,"
+                              "thr_bitrate_min,thr_loss_max,thr_lost_max,"
+                              "thr_dropped_max,thr_retransmit_max "
+                              "FROM srt_gw_slack WHERE gw_id=?", (gw_id,)).fetchone()
+                if r:
+                    return dict(zip(["notify_source","notify_client","notify_paused",
+                                     "thr_bitrate_min","thr_loss_max","thr_lost_max",
+                                     "thr_dropped_max","thr_retransmit_max"], r))
+        except Exception: pass
+        return {}
+
+    def _thr_alert(self, host, ts, route_id, route_name, key, val, thr, label, unit,
+                   webhook, channel, username, dev_name, worse_msg, better_msg,
+                   slack_color_bad, slack_color_ok):
+        """Generic threshold alert — fires on entry and recovery. Also logs to srt_event."""
+        if not thr or val is None: return
+        state = self.alert_state.setdefault(host, {})
+        bad = val > thr
+        if bad and not state.get(key):
+            msg = f"{worse_msg}: *{val:.2f} {unit}* (thr {thr} {unit})"
+            POLLER._slack_post(webhook, f":warning: *{dev_name}* — Route `{route_name}` {msg}",
+                               channel, username, color=slack_color_bad)
+            self._persist_event(host, ts, route_id, route_name,
+                                f"Threshold breach: {label}", f"{val:.2f} {unit} > {thr}")
+            state[key] = True
+        elif not bad and state.get(key):
+            msg = f"{better_msg}: {val:.2f} {unit}"
+            POLLER._slack_post(webhook, f":white_check_mark: *{dev_name}* — Route `{route_name}` {msg}",
+                               channel, username, color=slack_color_ok)
+            self._persist_event(host, ts, route_id, route_name,
+                                f"Threshold recovered: {label}", f"{val:.2f} {unit} <= {thr}")
+            state[key] = False
+
+    def _notify_gateway(self, host: str, dev_name: str, normalized: dict, cfg):
+        webhook, channel, username = cfg
+        # Load per-device notification config
+        gw_id = None
+        try:
+            with connect_db() as c:
+                r = c.execute("SELECT id FROM srt_gateway_device WHERE host=?", (host,)).fetchone()
+                if r: gw_id = r[0]
+        except Exception: pass
+        gcfg = self._load_gw_slack(gw_id) if gw_id else {}
+        if gcfg.get("notify_paused"): return
+
+        state = self.alert_state.setdefault(host, {})
+        ts = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())
+
+        for route_id, p in normalized.items():
+            rname  = p.get('name', route_id)
+            rstate = p.get('state', 'idle')
+            rkey   = f'state:{route_id}'
+            prev   = state.get(rkey)
+
+            # Route start/stop
+            if prev != rstate:
+                if rstate == 'running' and prev is not None:
+                    POLLER._slack_post(webhook,
+                        f':green_circle: *{dev_name}* — Route `{rname}` started',
+                        channel, username, color='good')
+                    self._persist_event(host, ts, route_id, rname, 'Route started')
+                elif rstate == 'idle' and prev == 'running':
+                    POLLER._slack_post(webhook,
+                        f':red_circle: *{dev_name}* — Route `{rname}` stopped',
+                        channel, username, color='danger')
+                    self._persist_event(host, ts, route_id, rname, 'Route stopped')
+                state[rkey] = rstate
+
+            if rstate != 'running':
+                continue
+
+            src  = p.get('source', {})
+            dsts = p.get('destinations', [])
+
+            # Source connect/disconnect
+            if gcfg.get('notify_source', 1):
+                src_state = src.get('state', '')
+                src_key   = f'src_state:{route_id}'
+                prev_src  = state.get(src_key)
+                if prev_src is not None and prev_src != src_state:
+                    if src_state == 'connected':
+                        POLLER._slack_post(webhook,
+                            f':satellite_antenna: *{dev_name}* — Route `{rname}` source connected',
+                            channel, username, color='good')
+                        self._persist_event(host, ts, route_id, rname, 'Source connected',
+                                            src.get('address', ''))
+                    elif prev_src == 'connected':
+                        POLLER._slack_post(webhook,
+                            f':zzz: *{dev_name}* — Route `{rname}` source disconnected',
+                            channel, username, color='warning')
+                        self._persist_event(host, ts, route_id, rname, 'Source disconnected')
+                state[src_key] = src_state
+
+            # Client connect/disconnect — per-IP detection to include IP in Slack msg
+            if gcfg.get('notify_client', 1):
+                curr_ips = set()
+                for _dst in dsts:
+                    for _conn in _dst.get('connections', []):
+                        _addr = _conn.get('address')
+                        if _addr and _addr != '0.0.0.0':
+                            curr_ips.add(_addr)
+                cli_ips_key = f'cli_ips:{route_id}'
+                prev_ips = state.get(cli_ips_key)
+                if prev_ips is not None:
+                    for _ip in sorted(curr_ips - prev_ips):
+                        POLLER._slack_post(webhook,
+                            f':busts_in_silhouette: *{dev_name}* — Route `{rname}` '
+                            f'client connected `{_ip}` ({len(curr_ips)} total)',
+                            channel, username, color='good')
+                    for _ip in sorted(prev_ips - curr_ips):
+                        POLLER._slack_post(webhook,
+                            f':bust_in_silhouette: *{dev_name}* — Route `{rname}` '
+                            f'client disconnected `{_ip}` ({len(curr_ips)} remaining)',
+                            channel, username, color='warning')
+                state[cli_ips_key] = curr_ips
+                state[f'cli_count:{route_id}'] = len(curr_ips)
+
+            # Threshold alerts
+            br   = p.get('total_bitrate_mbps')
+            loss = src.get('loss_pct')
+            # Aggregate lost/dropped/retransmit across all destination connections
+            lost = sum(len([c for c in d.get('connections', [])]) for d in dsts)  # placeholder
+            # Use src connection stats for lost/dropped/retransmit when available
+            src_conns = src.get('connections', [])
+            if src_conns:
+                sc = src_conns[0]
+                lost_val      = sc.get('srtNumLostPackets')
+                dropped_val   = sc.get('srtDroppedPackets')
+                retransmit_val= sc.get('srtRetransmitRate')
+            else:
+                lost_val = dropped_val = retransmit_val = None
+
+            thr_br  = float(gcfg.get('thr_bitrate_min') or 0)
+            thr_loss= float(gcfg.get('thr_loss_max') or 0)
+            thr_lost= float(gcfg.get('thr_lost_max') or 0)
+            thr_drop= float(gcfg.get('thr_dropped_max') or 0)
+            thr_ret = float(gcfg.get('thr_retransmit_max') or 0)
+
+            # Bitrate min (alert when BELOW threshold)
+            if thr_br and br is not None:
+                br_key = f'br_low:{route_id}'
+                bad = br < thr_br
+                if bad and not state.get(br_key):
+                    POLLER._slack_post(webhook,
+                        f':chart_with_downwards_trend: *{dev_name}* — Route `{rname}` bitrate low: *{br:.2f} Mb/s* (min {thr_br})',
+                        channel, username, color='warning')
+                    self._persist_event(host, ts, route_id, rname, 'Threshold breach: Bitrate',
+                                        f'{br:.2f} Mb/s < {thr_br}')
+                    state[br_key] = True
+                elif not bad and state.get(br_key):
+                    POLLER._slack_post(webhook,
+                        f':white_check_mark: *{dev_name}* — Route `{rname}` bitrate normal: {br:.2f} Mb/s',
+                        channel, username, color='good')
+                    self._persist_event(host, ts, route_id, rname, 'Threshold recovered: Bitrate',
+                                        f'{br:.2f} Mb/s >= {thr_br}')
+                    state[br_key] = False
+
+            self._thr_alert(host, ts, route_id, rname, f'loss:{route_id}', loss, thr_loss,
+                            'Loss', '%', webhook, channel, username, dev_name,
+                            'Packet loss', 'Loss normal', 'danger', 'good')
+            self._thr_alert(host, ts, route_id, rname, f'lost:{route_id}', lost_val, thr_lost,
+                            'Lost packets', 'pkts', webhook, channel, username, dev_name,
+                            'Lost packets', 'Lost packets normal', 'danger', 'good')
+            self._thr_alert(host, ts, route_id, rname, f'drop:{route_id}', dropped_val, thr_drop,
+                            'Dropped', 'pkts', webhook, channel, username, dev_name,
+                            'Dropped packets', 'Dropped normal', 'danger', 'good')
+            self._thr_alert(host, ts, route_id, rname, f'ret:{route_id}', retransmit_val, thr_ret,
+                            'Retransmit', 'b/s', webhook, channel, username, dev_name,
+                            'Retransmit rate', 'Retransmit normal', 'warning', 'good')
+
+
+SRT_POLLER: Optional['SRTGatewayPoller'] = None
 
 class App:
 
@@ -733,6 +1453,763 @@ class App:
             cherrypy.session['username'] = username.strip()
             raise cherrypy.HTTPRedirect('/')
         raise cherrypy.HTTPRedirect('/login?msg=error')
+
+
+    # ── SRT Gateway endpoints ─────────────────────────────────────────────────
+
+    @require_login
+    @cherrypy.expose
+    def gateway_dashboard(self):
+        import json as _j
+        with connect_db() as c:
+            devices = c.execute(
+                "SELECT id, name, host, port, protocol FROM srt_gateway_device"
+            ).fetchall()
+        rows = []
+        for dev in devices:
+            did, name, host, port, proto = dev
+            routes = list((SRT_POLLER.last_payloads.get(host) or {}).values()) if SRT_POLLER else []
+            status_badge = (
+                '<span class="badge text-bg-success">Online</span>' if routes
+                else '<span class="badge text-bg-secondary">Connecting...</span>'
+            )
+            route_rows = ""
+            for r in routes:
+                state = r.get("state", "idle")
+                sbadge = ('<span class="badge text-bg-success">running</span>'
+                          if state == "running" else
+                          '<span class="badge text-bg-secondary">idle</span>')
+                src  = r.get("source", {})
+                rtt  = src.get("rtt_ms")
+                loss = src.get("loss_pct")
+                br   = r.get("total_bitrate_mbps")
+                route_rows += (
+                    "<tr>"
+                    + "<td>" + str(r.get("name","")) + "</td>"
+                    + "<td>" + sbadge + "</td>"
+                    + "<td>" + ("%.2f Mb/s" % br if br is not None else "—") + "</td>"
+                    + "<td>" + ("%.1f ms" % rtt if rtt is not None else "—") + "</td>"
+                    + "<td>" + ("%.2f%%" % loss if loss is not None else "—") + "</td>"
+                    + "<td>" + str(r.get("active_connections", 0)) + "</td>"
+                    + '<td><a href="/gateway_route?host=' + host + "&route_id=" + str(r.get("id","")) + '" class="btn btn-sm btn-outline-primary">Details</a></td>'
+                    + "</tr>"
+                )
+            rows.append(
+                "<div class=\"card mb-3\">"
+                + "<div class=\"card-header d-flex justify-content-between align-items-center\">"
+                + "<strong>" + name + " (" + host + ")</strong>" + status_badge
+                + "</div>"
+                + "<div class=\"card-body p-0\">"
+                + "<table class=\"table table-sm mb-0\"><thead><tr>"
+                + "<th>Route</th><th>State</th><th>Bitrate</th><th>RTT</th><th>Loss</th><th>Conn.</th><th></th>"
+                + "</tr></thead><tbody>"
+                + (route_rows or "<tr><td colspan=7 class=text-muted>No data yet</td></tr>")
+                + "</tbody></table></div>"
+                + "<div class=\"card-footer small text-muted\">"
+                + '<a href="/gateway_add_device">+ Add device</a>'
+                + "</div></div>"
+            )
+        body = "".join(rows) or '<p class="text-muted">No SRT Gateway configured. <a href="/gateway_add_device">Add one</a>.</p>'
+        with connect_db() as c:
+            gw_rows = c.execute("SELECT id,name,host,port,protocol FROM srt_gateway_device ORDER BY id ASC").fetchall()
+            srt_gateways = [{"id":r[0],"name":r[1],"host":r[2],"port":r[3],"protocol":r[4]} for r in gw_rows]
+        return render("gateway_dashboard.html", srt_gateways=srt_gateways,
+                      page_title="SRT Gateway", user=current_user(),
+                      srt_retention_days=int(os.getenv('SRT_RETENTION_DAYS') or 30))
+
+    @require_login
+    @cherrypy.expose
+    def gateway_route(self, host=None, route_id=None, tab=None, msg=None):
+        import json as _j
+        if not host or not route_id:
+            raise cherrypy.HTTPRedirect("/devices")
+        payload = {}
+        if SRT_POLLER:
+            payload = (SRT_POLLER.last_payloads.get(host) or {}).get(route_id, {})
+        with connect_db() as c:
+            samples = c.execute(
+                "SELECT ts, total_bitrate_mbps, src_rtt_ms, src_loss_pct "
+                "FROM srt_route_sample WHERE device_host=? AND route_id=? "
+                "ORDER BY id DESC LIMIT 200", (host, route_id)
+            ).fetchall()
+            conns = c.execute(
+                "SELECT ts, direction, address, port, bitrate_mbps, rtt_ms, loss_pct "
+                "FROM srt_connection_sample WHERE device_host=? AND route_id=? "
+                "ORDER BY id DESC LIMIT 50", (host, route_id)
+            ).fetchall()
+        samples_json = _j.dumps([
+            {"ts": s[0], "bitrate": s[1], "rtt": s[2], "loss": s[3]}
+            for s in reversed(samples)
+        ])
+        conns_html = ""
+        for conn in conns[:20]:
+            ts, direction, addr, port, br, rtt, loss = conn
+            conns_html += (
+                "<tr><td>" + str(ts) + "</td><td>" + str(direction) + "</td>"
+                + "<td>" + str(addr) + ":" + str(port) + "</td>"
+                + "<td>" + ("%.2f" % br if br is not None else "—") + "</td>"
+                + "<td>" + ("%.1f" % rtt if rtt is not None else "—") + "</td>"
+                + "<td>" + ("%.2f%%" % loss if loss is not None else "—") + "</td></tr>"
+            )
+        src = payload.get("source", {})
+        state = payload.get("state", "—")
+        sbadge = "text-bg-success" if state == "running" else "text-bg-secondary"
+        br_s   = ("%.2f Mb/s" % payload["total_bitrate_mbps"]) if payload.get("total_bitrate_mbps") is not None else "—"
+        rtt_s  = ("%.1f ms" % src["rtt_ms"]) if src.get("rtt_ms") is not None else "—"
+        loss_s = ("%.2f%%" % src["loss_pct"]) if src.get("loss_pct") is not None else "—"
+        return render("gateway_route.html",
+                      page_title="Route — " + str(payload.get("name", route_id)),
+                      host=host, route_id=route_id,
+                      user=current_user())
+
+    @require_login
+    @cherrypy.expose
+    def gateway_add_device(self, name=None, host=None, port="443",
+                            protocol="https", username="haiadmin", password="haiadmin"):
+        if host:
+            lenv = os.getenv("MAX_SRTGATEWAY")
+            try: lgw = int(lenv) if lenv and str(lenv).strip() else None
+            except Exception: lgw = None
+            with connect_db() as c:
+                if lgw is not None:
+                    cnt = c.execute("SELECT COUNT(*) FROM srt_gateway_device").fetchone()[0] or 0
+                    if cnt >= lgw:
+                        raise cherrypy.HTTPRedirect(
+                            f"/devices?msg=Max+{lgw}+SRT+Gateway(s)+can+be+configured")
+                c.execute(
+                    "INSERT OR REPLACE INTO srt_gateway_device "
+                    "(name, host, port, protocol, username, password) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (name or host, host, int(port or 443), protocol, username, password)
+                )
+            raise cherrypy.HTTPRedirect("/devices")
+        raise cherrypy.HTTPRedirect("/devices")
+
+    @require_login
+    @cherrypy.expose
+    def gateway_delete_device(self, id=None):
+        if id:
+            with connect_db() as c:
+                c.execute("DELETE FROM srt_gateway_device WHERE id=?", (id,))
+        raise cherrypy.HTTPRedirect("/devices")
+
+    @require_login
+    @cherrypy.expose
+    def gateway_events(self, host=None, route_id=None, limit='20'):
+        import json as _j
+        cherrypy.response.headers["Content-Type"] = "application/json; charset=utf-8"
+        if not host:
+            return b'{"ok":false}'
+        try:
+            lim = max(1, min(100, int(limit)))
+        except Exception:
+            lim = 20
+        with connect_db() as c:
+            if route_id:
+                rows = c.execute(
+                    'SELECT ts, route_name, event_type, detail, ip_address FROM srt_event '
+                    'WHERE device_host=? AND route_id=? ORDER BY id DESC LIMIT ?',
+                    (host, route_id, lim)
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    'SELECT ts, route_name, event_type, detail, ip_address FROM srt_event '
+                    'WHERE device_host=? ORDER BY id DESC LIMIT ?',
+                    (host, lim)
+                ).fetchall()
+        events = [{"ts": r[0], "route": r[1], "type": r[2], "detail": r[3], "ip": r[4] or ""} for r in rows]
+        return _j.dumps({"ok": True, "events": events}).encode("utf-8")
+
+    @require_login
+    @cherrypy.expose
+    def gateway_logs(self, host=None, msg=None):
+        import html as _h
+        def esc(x): return _h.escape('' if x is None else str(x))
+        with connect_db() as c:
+            gateways = {r[0]: r[1] for r in c.execute(
+                'SELECT host, name FROM srt_gateway_device').fetchall()}
+            routes = c.execute(
+                'SELECT rs.device_host, rs.route_id, MAX(rs.route_name),'
+                ' MIN(rs.ts), MAX(rs.ts), MAX(rs.state)'
+                ' FROM srt_route_sample rs'
+                ' GROUP BY rs.device_host, rs.route_id'
+                ' ORDER BY MAX(rs.ts) DESC'
+            ).fetchall()
+            evt_counts = {(r[0], r[1]): r[2] for r in c.execute(
+                'SELECT device_host, route_id, COUNT(*) FROM srt_event'
+                ' GROUP BY device_host, route_id').fetchall()}
+        msg_html = ('<div class="alert alert-success">' + esc(msg) + '</div>') if msg else ''
+        def fmt_ts(ts):
+            if not ts: return '—'
+            try:
+                s = str(ts)[:16]; p = s[:10].split('-')
+                return p[2]+'/'+p[1]+'/'+p[0]+' '+s[11:16]
+            except Exception: return str(ts)
+        rows_html = ''
+        for dev_host, route_id, rname, first_seen, last_seen, last_state in (routes or []):
+            gw_name = gateways.get(dev_host, dev_host)
+            active = last_state == 'running'
+            sbadge = ('<span class="badge text-bg-success">Active</span>' if active
+                      else '<span class="badge text-bg-secondary">Idle</span>')
+            evts = evt_counts.get((dev_host, route_id), 0)
+            rows_html += (
+                '<tr>'
+                + '<td>' + esc(gw_name) + '</td>'
+                + '<td class="fw-semibold">' + esc(rname) + '</td>'
+                + '<td>' + sbadge + '</td>'
+                + '<td class="small text-muted">' + fmt_ts(first_seen) + '</td>'
+                + '<td class="small text-muted">' + fmt_ts(last_seen) + '</td>'
+                + '<td><span class="badge text-bg-secondary">' + str(evts) + '</span></td>'
+                + '<td>'
+                + '<a class="btn btn-sm btn-outline-primary me-1" href="/gateway_logs_route?host='
+                + esc(dev_host) + '&route_id=' + esc(route_id) + '">Events</a>'
+                + '<a class="btn btn-sm btn-outline-dark me-1" href="/gateway_logs_pdf?host='
+                + esc(dev_host) + '&route_id=' + esc(route_id) + '" target="_blank">PDF</a>'
+                + '<form method="post" action="/gateway_logs_delete" class="d-inline"'
+                + ' onsubmit="return confirm(\'Delete all logs for this route?\')">'
+                + '<input type="hidden" name="host" value="' + esc(dev_host) + '">'
+                + '<input type="hidden" name="route_id" value="' + esc(route_id) + '">'
+                + '<button class="btn btn-sm btn-outline-danger">Delete</button>'
+                + '</form></td></tr>'
+            )
+        # Group by day with dividers
+        items = []
+        current_day = None
+        for dev_host, route_id, rname, first_seen, last_seen, last_state in (routes or []):
+            gw_name = gateways.get(dev_host, dev_host)
+            active = last_state == 'running'
+            sbadge = ('<span class="badge text-bg-success">Active</span>' if active
+                      else '<span class="badge text-bg-secondary">Idle</span>')
+            evts = evt_counts.get((dev_host, route_id), 0)
+            try:
+                p = str(last_seen)[:10].split('-'); day_lbl = p[2]+'/'+p[1]+'/'+p[0]
+            except Exception: day_lbl = str(last_seen)[:10]
+            if day_lbl != current_day:
+                items.append(
+                    '<tr><td colspan="7" class="p-0">'
+                    '<div class="bd-callout bd-callout-info w-100 mb-0" role="separator">'
+                    + day_lbl + '</div></td></tr>'
+                )
+                current_day = day_lbl
+            items.append(
+                '<tr>'
+                + '<td>' + esc(gw_name) + '</td>'
+                + '<td class="fw-semibold">' + esc(rname) + '</td>'
+                + '<td>' + sbadge + '</td>'
+                + '<td class="small text-muted">' + fmt_ts(first_seen) + '</td>'
+                + '<td class="small text-muted">' + fmt_ts(last_seen) + '</td>'
+                + '<td><span class="badge text-bg-secondary">' + str(evts) + '</span></td>'
+                + '<td>'
+                + '<a class="btn btn-sm btn-outline-primary me-1" href="/gateway_logs_route?host='
+                + esc(dev_host) + '&route_id=' + esc(route_id) + '">Events</a>'
+                + '<a class="btn btn-sm btn-outline-dark me-1" href="/gateway_logs_pdf?host='
+                + esc(dev_host) + '&route_id=' + esc(route_id) + '" target="_blank">PDF</a>'
+                + '<form method="post" action="/gateway_logs_delete" class="d-inline"'
+                + ' onsubmit="return confirm(\'Delete all logs for this route?\')">' 
+                + '<input type="hidden" name="host" value="' + esc(dev_host) + '">'
+                + '<input type="hidden" name="route_id" value="' + esc(route_id) + '">'
+                + '<button class="btn btn-sm btn-outline-danger">Delete</button>'
+                + '</form></td></tr>'
+            )
+        tbody = ''.join(items) if items else '<tr><td colspan="7" class="text-muted text-center p-4">No route history yet.</td></tr>'
+        msg_html2 = ('<div class="alert alert-info">' + esc(msg) + '</div>') if msg else ''
+        html_body = (
+            '<!doctype html><html><head>'
+            '<meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            '<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">'
+            '<style>.bd-callout{padding:.75rem 1rem;border:1px solid var(--bs-border-color);'
+            'border-left-width:.25rem;border-radius:.25rem;background-color:var(--bs-body-bg);}'
+            '.bd-callout-info{border-left-color:#0d6efd;background:rgba(13,110,253,.06);}'
+            '</style>'
+            '<title>SRT Gateway Logs — StreamPilot</title>'
+            '</head><body class="p-3">'
+            '<div class="d-flex justify-content-between align-items-center mb-3">'
+            '<h1 class="h4 m-0">SRT Gateway — Route Logs</h1>'
+            '<a class="btn btn-outline-secondary" href="/gateway_dashboard">← SRT Gateway</a>'
+            '</div>'
+            + msg_html2
+            + '<div class="table-responsive">'
+            '<table class="table table-sm align-middle">'
+            '<thead><tr>'
+            '<th>Gateway</th><th>Route</th><th>Status</th>'
+            '<th>First seen (UTC)</th><th>Last seen (UTC)</th><th>Events</th><th>Actions</th>'
+            '</tr></thead>'
+            '<tbody>' + tbody + '</tbody>'
+            '</table></div>'
+            '<script>(function(){'
+            'var tz=new Date().getTimezoneOffset();'
+            "document.querySelectorAll('a[href*=\"gateway_logs_pdf\"]').forEach(function(a){"
+            "if(a.href.indexOf('tz_offset')<0) a.href+='&tz_offset='+tz;});})();</script>"
+            '</body></html>'
+        )
+        cherrypy.response.headers['Content-Type'] = 'text/html; charset=utf-8'
+        return html_body.encode('utf-8')
+
+    @require_login
+    @cherrypy.expose
+    def gateway_logs_route(self, host=None, route_id=None, page='1'):
+        import html as _h
+        def esc(x): return _h.escape('' if x is None else str(x))
+        if not host or not route_id:
+            raise cherrypy.HTTPRedirect('/gateway_logs')
+        PER_PAGE = 50
+        try: pgn = max(1, int(page))
+        except Exception: pgn = 1
+        offset = (pgn - 1) * PER_PAGE
+        with connect_db() as c:
+            total = c.execute(
+                'SELECT COUNT(*) FROM srt_event WHERE device_host=? AND route_id=?',
+                (host, route_id)).fetchone()[0]
+            rows = c.execute(
+                'SELECT ts, event_type, detail, ip_address FROM srt_event'
+                ' WHERE device_host=? AND route_id=? ORDER BY id DESC LIMIT ? OFFSET ?',
+                (host, route_id, PER_PAGE, offset)).fetchall()
+            rn = c.execute(
+                'SELECT route_name FROM srt_event WHERE device_host=? AND route_id=? LIMIT 1',
+                (host, route_id)).fetchone()
+            rname = rn[0] if rn else route_id
+        total_pages = max(1, (total + PER_PAGE - 1) // PER_PAGE)
+        def fmt_ts(ts):
+            try:
+                s = str(ts); p = s[:10].split('-')
+                return p[2]+'/'+p[1]+'/'+p[0], s[11:19]
+            except Exception: return str(ts), ''
+        rows_html = ''
+        for ts, etype, detail, ip in rows:
+            dt, tm = fmt_ts(ts)
+            t = etype or ''
+            if 'started' in t or 'connected' in t:
+                badge = '<span class="badge text-bg-success">' + esc(t) + '</span>'
+            elif 'stopped' in t or 'disconnected' in t:
+                badge = '<span class="badge text-bg-danger">' + esc(t) + '</span>'
+            else:
+                badge = '<span class="badge text-bg-secondary">' + esc(t) + '</span>'
+            ip_cell = ('<code class="small">' + esc(ip) + '</code>') if ip else '<span class="text-muted">—</span>'
+            rows_html += ('<tr data-utc="' + esc(str(ts)[:19]) + '">'
+                          + '<td class="text-muted small local-time"></td>'
+                          + '<td class="text-muted small">' + dt + '</td>'
+                          + '<td class="text-muted small">' + tm + '</td>'
+                          + '<td>' + badge + '</td>'
+                          + '<td class="small text-muted">' + esc(detail or '') + '</td>'
+                          + '<td>' + ip_cell + '</td></tr>')
+        if not rows_html:
+            rows_html = '<tr><td colspan="6" class="text-muted text-center p-4">No events.</td></tr>'
+        def plink(p2, label):
+            dis = ' disabled' if p2 < 1 or p2 > total_pages else ''
+            return ('<li class="page-item' + dis + '"><a class="page-link" href="/gateway_logs_route?host='
+                    + esc(host) + '&route_id=' + esc(route_id) + '&page=' + str(p2) + '">' + label + '</a></li>')
+        pager = ''
+        if total_pages > 1:
+            items = plink(pgn-1, '‹')
+            for i in range(max(1, pgn-3), min(total_pages+1, pgn+4)):
+                act = ' active' if i == pgn else ''
+                items += ('<li class="page-item' + act + '"><a class="page-link" href="/gateway_logs_route?host='
+                           + esc(host) + '&route_id=' + esc(route_id) + '&page=' + str(i) + '">' + str(i) + '</a></li>')
+            items += plink(pgn+1, '›')
+            pager = '<nav><ul class="pagination pagination-sm mb-0">' + items + '</ul></nav>'
+        html_body2 = (
+            '<!doctype html><html><head>'
+            '<meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            '<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">'
+            '<title>Events — ' + esc(rname) + ' — StreamPilot</title>'
+            '</head><body class="p-4">'
+            '<div class="d-flex justify-content-between align-items-center mb-3">'
+            '<div class="d-flex align-items-center gap-2">'
+            '<a href="/gateway_logs" class="btn btn-outline-secondary btn-sm">← Logs</a>'
+            '<h1 class="h4 m-0">Events — ' + esc(rname) + '</h1>'
+            '<span class="badge text-bg-secondary">' + str(total) + ' total</span>'
+            '</div></div>'
+            '<div class="mb-3">'
+            '<input type="search" id="evtSearch" class="form-control" placeholder="Search events, details or IP…">'
+            '</div>'
+            '<div class="table-responsive">'
+            '<table class="table table-sm table-hover align-middle" id="evtTable">'
+            '<thead class="table-light"><tr>'
+            '<th>Local time</th><th>Date (UTC)</th><th>Time (UTC)</th><th>Event</th><th>Detail</th><th>IP</th>'
+            '</tr></thead>'
+            '<tbody>' + rows_html + '</tbody>'
+            '</table></div>'
+            '<div class="d-flex justify-content-between align-items-center mt-3">'
+            '<span class="text-muted small" id="evtCount">Page ' + str(pgn) + ' / ' + str(total_pages)
+            + ' — ' + str(total) + ' events</span>'
+            + pager
+            + '</div>'
+            + """
+            <script>
+            (function(){
+              var tz = new Date().getTimezoneOffset();
+              document.querySelectorAll('a[href*="gateway_logs_pdf"]').forEach(function(a){
+                if(a.href.indexOf('tz_offset') < 0) a.href += '&tz_offset=' + tz;
+              });
+              function fillLocal(){
+                document.querySelectorAll('tr[data-utc]').forEach(function(tr){
+                  var utc = tr.dataset.utc; if(!utc) return;
+                  var cell = tr.querySelector('.local-time'); if(!cell) return;
+                  try {
+                    var d = new Date(utc.replace(' ','T') + 'Z');
+                    cell.textContent = d.toLocaleTimeString(undefined,
+                      {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+                  } catch(e) { cell.textContent = '?'; }
+                });
+              }
+              if(document.readyState === 'loading'){
+                document.addEventListener('DOMContentLoaded', fillLocal);
+              } else { fillLocal(); }
+            """
+            '  var inp=document.getElementById("evtSearch");'
+            '  var tbl=document.getElementById("evtTable");'
+            '  var tot=' + str(total) + ';'
+            '  inp.addEventListener("input",function(){'
+            '    var q=inp.value.toLowerCase();'
+            '    var rows=tbl.querySelectorAll("tbody tr");'
+            '    var shown=0;'
+            '    rows.forEach(function(tr){'
+            '      var m=!q||tr.textContent.toLowerCase().indexOf(q)>=0;'
+            '      tr.style.display=m?"":"none"; if(m)shown++;'
+            '    });'
+            '    document.getElementById("evtCount").textContent='
+            '      q?(shown+" result(s) found"):(tot+" events");'
+            '  });'
+            '})();</script>'
+            '</body></html>'
+        )
+        cherrypy.response.headers['Content-Type'] = 'text/html; charset=utf-8'
+        return html_body2.encode('utf-8')
+
+    @require_login
+    @cherrypy.expose
+    def gateway_logs_delete(self, host=None, route_id=None):
+        if host and route_id:
+            with connect_db() as c:
+                for tbl in ('srt_event', 'srt_route_sample', 'srt_connection_sample', 'srt_session'):
+                    c.execute('DELETE FROM ' + tbl + ' WHERE device_host=? AND route_id=?',
+                              (host, route_id))
+        raise cherrypy.HTTPRedirect('/gateway_logs?msg=Logs+deleted')
+
+    @require_login
+    @cherrypy.expose
+    def gateway_logs_pdf(self, host=None, route_id=None, tz_offset=None):
+        import html as _h, time as _t
+        from datetime import datetime as _dtlg, timedelta as _tdlg
+        try: _tz_min = int((tz_offset[-1] if isinstance(tz_offset, list) else tz_offset) or 0)
+        except Exception: _tz_min = 0
+        _tz_hours = -_tz_min / 60
+        _tz_label = f"UTC{'+' if _tz_hours >= 0 else ''}{_tz_hours:g}"
+        def _utc_to_local_lg(ts_str):
+            try:
+                d = _dtlg.strptime(str(ts_str)[:19], '%Y-%m-%d %H:%M:%S')
+                return (d - _tdlg(minutes=_tz_min)).strftime('%H:%M:%S')
+            except Exception: return ''
+        def esc(x): return _h.escape('' if x is None else str(x))
+        if not host or not route_id:
+            raise cherrypy.HTTPRedirect('/gateway_logs')
+        with connect_db() as c:
+            rows = c.execute(
+                'SELECT ts, event_type, detail, ip_address FROM srt_event'
+                ' WHERE device_host=? AND route_id=? ORDER BY id ASC',
+                (host, route_id)).fetchall()
+            rn = c.execute(
+                'SELECT route_name FROM srt_event WHERE device_host=? AND route_id=? LIMIT 1',
+                (host, route_id)).fetchone()
+            rname = rn[0] if rn else route_id
+            gw = c.execute('SELECT name FROM srt_gateway_device WHERE host=?', (host,)).fetchone()
+            gw_name = gw[0] if gw else host
+        generated = _t.strftime('%d/%m/%Y %H:%M:%S UTC', _t.gmtime())
+        safe = rname.replace(' ', '_').replace('/', '-')[:40]
+
+        # ── reportlab PDF ─────────────────────────────────────────────────
+        try:
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib import colors
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.lib.units import mm
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+            import io
+
+            buf = io.BytesIO()
+            doc = SimpleDocTemplate(buf, pagesize=A4,
+                                    leftMargin=15*mm, rightMargin=15*mm,
+                                    topMargin=15*mm, bottomMargin=15*mm)
+            styles = getSampleStyleSheet()
+            title_style = ParagraphStyle('title', parent=styles['Normal'],
+                                         fontSize=14, fontName='Helvetica-Bold', spaceAfter=4)
+            meta_style  = ParagraphStyle('meta',  parent=styles['Normal'],
+                                         fontSize=8, textColor=colors.grey, spaceAfter=10)
+            cell_style  = ParagraphStyle('cell',  parent=styles['Normal'], fontSize=7.5)
+
+            # Fetch SRT version from live payload if available
+            _log_srt_ver = ''
+            if SRT_POLLER:
+                _lp2 = (SRT_POLLER.last_payloads.get(host) or {}).get(route_id, {})
+                _src2 = _lp2.get('source') or {}
+                _src2_conns = _src2.get('connections') or []
+                if _src2_conns:
+                    _log_srt_ver = _src2_conns[0].get('srt_version', '')
+                if not _log_srt_ver:
+                    _log_srt_ver = _src2.get('srt_version', '')
+            _ver_str = f' &nbsp;|&nbsp; SRT {_log_srt_ver}' if _log_srt_ver else ''
+
+            story = [
+                Paragraph(f'Route Events — {rname}', title_style),
+                Paragraph(
+                    f'Gateway: {gw_name} ({host}) &nbsp;|&nbsp; '
+                    f'Route ID: {route_id}{_ver_str} &nbsp;|&nbsp; Generated: {generated}',
+                    meta_style),
+            ]
+
+            # Table header + rows
+            header = [[_tz_label, 'Date (UTC)', 'Time (UTC)', 'Event', 'Detail', 'IP']]
+            data_rows = []
+            for ts, etype, detail, ip in rows:
+                try:
+                    p = str(ts)[:10].split('-')
+                    dt, tm = p[2]+'/'+p[1]+'/'+p[0], str(ts)[11:19]
+                except Exception:
+                    dt = tm = str(ts)
+                loc_tm = _utc_to_local_lg(str(ts)[:19])
+                data_rows.append([
+                    Paragraph(loc_tm or '', cell_style),
+                    Paragraph(dt or '', cell_style),
+                    Paragraph(tm or '', cell_style),
+                    Paragraph(etype or '', cell_style),
+                    Paragraph(detail or '', cell_style),
+                    Paragraph(ip or '', cell_style),
+                ])
+            if not data_rows:
+                data_rows = [['—', '—', '—', 'No events recorded', '', '']]
+
+            col_widths = [20*mm, 18*mm, 18*mm, 30*mm, 58*mm, 22*mm]
+            tbl = Table(header + data_rows, colWidths=col_widths, repeatRows=1)
+            tbl.setStyle(TableStyle([
+                ('BACKGROUND',  (0,0), (-1,0), colors.HexColor('#f0f0f0')),
+                ('FONTNAME',    (0,0), (-1,0), 'Helvetica-Bold'),
+                ('FONTSIZE',    (0,0), (-1,0), 8),
+                ('FONTSIZE',    (0,1), (-1,-1), 7.5),
+                ('GRID',        (0,0), (-1,-1), 0.3, colors.HexColor('#dddddd')),
+                ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#fafafa')]),
+                ('VALIGN',      (0,0), (-1,-1), 'TOP'),
+                ('TOPPADDING',  (0,0), (-1,-1), 3),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 3),
+                ('LEFTPADDING', (0,0), (-1,-1), 4),
+            ]))
+            story.append(tbl)
+            story.append(Spacer(1, 8*mm))
+            story.append(Paragraph('StreamPilot — SRT Gateway Logs',
+                                   ParagraphStyle('footer', parent=styles['Normal'],
+                                                  fontSize=7, textColor=colors.grey)))
+            doc.build(story)
+            pdf_bytes = buf.getvalue()
+            cherrypy.response.headers['Content-Type'] = 'application/pdf'
+            cherrypy.response.headers['Content-Disposition'] = f'attachment; filename="events_{safe}.pdf"'
+            return pdf_bytes
+        except ImportError:
+            pass
+        except Exception as _pe:
+            cherrypy.log(f'[gateway_logs_pdf] reportlab error: {_pe}')
+
+        # ── fallback: wkhtmltopdf ─────────────────────────────────────────
+        import subprocess as _sp, tempfile as _tf, os as _os
+        trs = ''
+        for ts, etype, detail, ip in rows:
+            try:
+                p = str(ts)[:10].split('-'); dt = p[2]+'/'+p[1]+'/'+p[0]; tm = str(ts)[11:19]
+            except Exception:
+                dt = tm = str(ts)
+            from datetime import datetime as _dtfb, timedelta as _tdfb
+            try:
+                _local_tm = (_dtfb.strptime(str(ts)[:19], '%Y-%m-%d %H:%M:%S')
+                             - _tdfb(minutes=_tz_min)).strftime('%H:%M:%S')
+            except Exception: _local_tm = ''
+            trs += ('<tr><td>' + esc(_local_tm) + '</td>'
+                    + '<td>' + esc(dt) + '</td><td>' + esc(tm) + '</td>'
+                    + '<td>' + esc(etype or '') + '</td><td>' + esc(detail or '') + '</td>'
+                    + '<td>' + esc(ip or '') + '</td></tr>')
+        html_doc = (
+            '<!DOCTYPE html><html><head><meta charset="utf-8"><style>'
+            'body{font-family:Arial,sans-serif;font-size:11px;margin:20px}'
+            'h1{font-size:16px;margin-bottom:4px}.meta{color:#666;font-size:10px;margin-bottom:16px}'
+            'table{width:100%;border-collapse:collapse}'
+            'th{background:#f0f0f0;text-align:left;padding:5px 8px;font-size:10px;text-transform:uppercase}'
+            'td{padding:4px 8px;border-bottom:1px solid #eee;vertical-align:top}'
+            'tr:nth-child(even) td{background:#fafafa}'
+            '.footer{margin-top:20px;color:#999;font-size:9px;text-align:center}'
+            '</style></head><body>'
+            '<h1>Route Events — ' + esc(rname) + '</h1>'
+            '<div class="meta">Gateway: ' + esc(gw_name) + ' (' + esc(host) + ') &nbsp;|&nbsp; '
+            'Route ID: ' + esc(route_id) + ' &nbsp;|&nbsp; Generated: ' + generated + '</div>'
+            f'<table><thead><tr><th>{_tz_label}</th><th>Date (UTC)</th><th>Time (UTC)</th><th>Event</th><th>Detail</th><th>IP</th></tr></thead>'
+            '<tbody>' + (trs or '<tr><td colspan="5">No events recorded.</td></tr>') + '</tbody></table>'
+            '<div class="footer">StreamPilot — SRT Gateway Logs</div>'
+            '</body></html>'
+        )
+        try:
+            with _tf.NamedTemporaryFile(suffix='.html', delete=False, mode='w', encoding='utf-8') as f:
+                f.write(html_doc); hp = f.name
+            pp = hp.replace('.html', '.pdf')
+            r = _sp.run(['wkhtmltopdf', '--quiet', '--page-size', 'A4', hp, pp],
+                        capture_output=True, timeout=30)
+            if r.returncode == 0 and _os.path.exists(pp):
+                data = open(pp, 'rb').read()
+                _os.unlink(hp); _os.unlink(pp)
+                cherrypy.response.headers['Content-Type'] = 'application/pdf'
+                cherrypy.response.headers['Content-Disposition'] = f'attachment; filename="events_{safe}.pdf"'
+                return data
+            _os.unlink(hp)
+            if _os.path.exists(pp): _os.unlink(pp)
+        except Exception:
+            pass
+        # Last resort: HTML download
+        cherrypy.response.headers['Content-Type'] = 'text/html; charset=utf-8'
+        cherrypy.response.headers['Content-Disposition'] = f'attachment; filename="events_{safe}.html"'
+        return html_doc.encode('utf-8')
+
+    @require_login
+    @cherrypy.expose
+    def gateway_data_raw(self, host=None):
+        """Fetch raw data directly from the gateway API and return full JSON.
+        Includes device info, all route configs, and full statistics
+        (source connections with all SRT fields, destination clientsStat, etc.)
+        """
+        import json as _j
+        cherrypy.response.headers["Content-Type"] = "application/json; charset=utf-8"
+        if not host:
+            return b'{"ok":false,"error":"missing host"}'
+        # Get gateway credentials from DB
+        try:
+            with connect_db() as c:
+                row = c.execute(
+                    "SELECT protocol, port, username, password, gw_device_id, session_id "
+                    "FROM srt_gateway_device WHERE host=?", (host,)
+                ).fetchone()
+        except Exception as e:
+            return _j.dumps({"ok": False, "error": str(e)}).encode("utf-8")
+        if not row:
+            return b'{"ok":false,"error":"device not found"}'
+        proto, port, user, pwd, gw_id, sid = row
+        base = f'{proto}://{host}:{port}'
+        from collect.scripts.srt_gateway import login, fetch_device_id, _HTTP, _cookies
+        # Reuse or obtain session
+        if not sid:
+            sid = login(base, user, pwd)
+            if not sid:
+                return b'{"ok":false,"error":"login failed"}'
+        result = {"ok": True, "host": host, "base_url": base}
+        try:
+            # 1. Device info
+            r = _HTTP.get(base + "/api/devices", cookies=_cookies(sid),
+                          timeout=5, verify=False)
+            if r.status_code == 200:
+                devices = r.json()
+                result["device_info"] = devices[0] if devices else {}
+                if not gw_id and devices:
+                    gw_id = devices[0].get("_id")
+            # 2. Device config (includes route list)
+            if gw_id:
+                r2 = _HTTP.get(f"{base}/api/devices/{gw_id}", cookies=_cookies(sid),
+                               timeout=5, verify=False)
+                if r2.status_code == 200:
+                    result["device_config"] = r2.json()
+            # 3. All routes with full statistics
+            if gw_id:
+                r3 = _HTTP.get(f"{base}/api/gateway/{gw_id}/routes",
+                               cookies=_cookies(sid), timeout=5, verify=False)
+                if r3.status_code == 200:
+                    routes_data = r3.json()
+                    routes_list = routes_data.get("data", routes_data) \
+                        if isinstance(routes_data, dict) else routes_data
+                    result["routes_config"] = routes_list
+                    # Per-route full statistics
+                    route_stats = {}
+                    for route in (routes_list or []):
+                        rid = route.get("id")
+                        if not rid:
+                            continue
+                        rs = _HTTP.get(
+                            f"{base}/api/gateway/{gw_id}/statistics?routeID={rid}",
+                            cookies=_cookies(sid), timeout=5, verify=False
+                        )
+                        if rs.status_code == 200:
+                            route_stats[rid] = rs.json()
+                    result["routes_statistics"] = route_stats
+        except Exception as e:
+            result["error"] = str(e)
+        return _j.dumps(result, indent=2).encode("utf-8")
+
+    @require_login
+    @cherrypy.expose
+    def gateway_route_stats(self, host=None, route_id=None):
+        """Return full raw statistics for one route directly from the gateway API."""
+        import json as _j
+        cherrypy.response.headers["Content-Type"] = "application/json; charset=utf-8"
+        if not host or not route_id:
+            return b'{"ok":false,"error":"missing host or route_id"}'
+        try:
+            with connect_db() as c:
+                row = c.execute(
+                    "SELECT protocol, port, username, password, gw_device_id, session_id "
+                    "FROM srt_gateway_device WHERE host=?", (host,)
+                ).fetchone()
+        except Exception as e:
+            return _j.dumps({"ok": False, "error": str(e)}).encode("utf-8")
+        if not row:
+            return b'{"ok":false,"error":"device not found"}'
+        proto, port, user, pwd, gw_id, sid = row
+        base = f'{proto}://{host}:{port}'
+        from collect.scripts.srt_gateway import login, _HTTP, _cookies
+        if not sid:
+            sid = login(base, user, pwd)
+            if not sid:
+                return b'{"ok":false,"error":"login failed"}'
+        try:
+            r = _HTTP.get(
+                f"{base}/api/gateway/{gw_id}/statistics?routeID={route_id}",
+                cookies=_cookies(sid), timeout=5, verify=False
+            )
+            if r.status_code != 200:
+                return _j.dumps({"ok": False, "error": f"HTTP {r.status_code}"}).encode("utf-8")
+            data = r.json()
+            # Also get the route config for static fields
+            r2 = _HTTP.get(
+                f"{base}/api/gateway/{gw_id}/routes/{route_id}",
+                cookies=_cookies(sid), timeout=5, verify=False
+            )
+            config = r2.json() if r2.status_code == 200 else {}
+            return _j.dumps({"ok": True, "stats": data, "config": config}, indent=2).encode("utf-8")
+        except Exception as e:
+            return _j.dumps({"ok": False, "error": str(e)}).encode("utf-8")
+
+    @require_login
+    @cherrypy.expose
+    def gateway_data(self, host=None):
+        import json as _j
+        from datetime import datetime as _dtn
+        cherrypy.response.headers["Content-Type"] = "application/json; charset=utf-8"
+        if not host or not SRT_POLLER:
+            return b'{"ok":false}'
+        routes = SRT_POLLER.last_payloads.get(host, {})
+        route_list = list(routes.values())
+        # Enrich each route with oldest_sample_days for retention badge
+        try:
+            with connect_db() as c:
+                for r in route_list:
+                    row = c.execute(
+                        'SELECT MIN(ts) FROM srt_route_sample WHERE device_host=? AND route_id=?',
+                        (host, r.get('id'))
+                    ).fetchone()
+                    oldest = row[0] if row else None
+                    if oldest:
+                        try:
+                            dt = _dtn.strptime(str(oldest)[:19], '%Y-%m-%d %H:%M:%S')
+                            r['oldest_sample_days'] = (_dtn.utcnow() - dt).days
+                        except Exception:
+                            r['oldest_sample_days'] = None
+                    else:
+                        r['oldest_sample_days'] = None
+        except Exception:
+            pass
+        return _j.dumps({"ok": True, "routes": route_list}).encode("utf-8")
 
     @cherrypy.expose
     def logout(self):
@@ -929,10 +2406,11 @@ class App:
                 age_sec = None
                 try:
                     if last_ts:
-                        # ts stored as ISO, parse lightweight: 'YYYY-MM-DDTHH:MM:SS'
                         from datetime import datetime
-                        dt = datetime.fromisoformat(str(last_ts)[:19])
-                        age_sec = max(0, int((datetime.now() - dt).total_seconds()))
+                        dt = datetime.strptime(str(last_ts)[:19], '%Y-%m-%dT%H:%M:%S') \
+                            if 'T' in str(last_ts) else \
+                            datetime.strptime(str(last_ts)[:19], '%Y-%m-%d %H:%M:%S')
+                        age_sec = max(0, int((datetime.utcnow() - dt).total_seconds()))
                 except Exception:
                     age_sec = None
                 rows.append((did, name, host, port, last_ts, active, age_sec))
@@ -949,10 +2427,11 @@ class App:
                 return f'<span class="badge text-bg-warning">{age}s</span>'
             return f'<span class="badge text-bg-danger">{age}s</span>'
 
-        def spark_svg(host):
-            # Build a tiny SVG sparkline (120x24) from POLLER.age_history[host]
+        def spark_svg(host, srt=False):
+            # Build a tiny SVG sparkline (120x24) from POLLER/SRT_POLLER.age_history[host]
             try:
-                hist = (POLLER.age_history.get(host) if POLLER and getattr(POLLER, 'age_history', None) else None)
+                poller = SRT_POLLER if srt else POLLER
+                hist = (poller.age_history.get(host) if poller and getattr(poller, 'age_history', None) else None)
                 if not hist:
                     return ''
                 pts = list(hist)[-120:]  # last ~2 minutes depending on interval
@@ -1052,20 +2531,17 @@ class App:
             '<div class="card mb-3"><div class="card-body">',
             f'<div class="mb-1"><strong>DB file:</strong> <code>{esc(db_path)}</code></div>',
             f'<div class="mb-1"><strong>Size:</strong> {hsize(db_size_bytes)}</div>',
-            f'<div class="mb-1"><strong>Sessions:</strong> {sessions_total} <span class="text-muted">(active {sessions_active})</span></div>',
-            f'<div class="mb-0"><strong>Samples:</strong> {samples_total}' + (f' <span class="text-muted">(last: {esc(last_sample_any)})</span>' if last_sample_any else '') + '</div>',
-            '<div class="mt-2"><a class="btn btn-sm btn-outline-dark" href="/logs_ui">Open logs</a></div>',
             '</div></div>',
             '<div class="table-responsive">',
             '<table class="table table-sm align-middle">',
             '<thead><tr>',
-            '<th>ID</th><th>Name</th><th>Host</th><th>Port</th><th>Last sample ts</th><th>Age</th><th>Spark</th><th>Active sessions</th><th>Actions</th>',
+            '<th>Type</th><th>Name</th><th>Host</th><th>Port</th><th>Last sample ts</th><th>Age</th><th>Spark</th><th>Active sessions</th><th>Actions</th>',
             '</tr></thead><tbody>'
         ]
         if rows:
             for (did, name, host, port, last_ts, active, age_sec) in rows:
                 body.append('<tr>')
-                body.append(f'<td>{did}</td>')
+                body.append(f'<td><span class="badge text-bg-secondary">StreamHub</span></td>')
                 body.append(f'<td>{esc(name)}</td>')
                 body.append(f'<td>{esc(host)}</td>')
                 body.append(f'<td>{esc(port)}</td>')
@@ -1078,7 +2554,53 @@ class App:
                 body.append('</td>')
                 body.append('</tr>')
         else:
-            body.append('<tr><td colspan="9" class="text-muted">No devices</td></tr>')
+            body.append('<tr><td colspan="9" class="text-muted">No StreamHub devices</td></tr>')
+        # SRT Gateway rows
+        with connect_db() as _cgw:
+            gw_devs = _cgw.execute(
+                'SELECT id, name, host, port FROM srt_gateway_device ORDER BY id ASC'
+            ).fetchall()
+        for gw in gw_devs:
+            gwid, gwname, gwhost, gwport = gw
+            # Last sample ts for this gateway
+            gw_last_ts = None
+            gw_running_routes = 0
+            try:
+                with connect_db() as _cg:
+                    r_ts = _cg.execute(
+                        'SELECT MAX(ts) FROM srt_route_sample WHERE device_host=?', (gwhost,)
+                    ).fetchone()[0]
+                    gw_last_ts = r_ts
+                    gw_running_routes = (_cg.execute(
+                        'SELECT COUNT(DISTINCT route_id) FROM srt_session '
+                        'WHERE device_host=? AND ended_at IS NULL', (gwhost,)
+                    ).fetchone()[0] or 0)
+            except Exception:
+                pass
+            gw_age_sec = None
+            try:
+                if gw_last_ts:
+                    from datetime import datetime as _dth
+                    dt = _dth.strptime(str(gw_last_ts)[:19], "%Y-%m-%d %H:%M:%S")
+                    gw_age_sec = max(0, int((_dth.utcnow() - dt).total_seconds()))
+            except Exception:
+                pass
+            # Poller status for SRT Gateway
+            gw_poller_ok = bool(SRT_POLLER and getattr(SRT_POLLER, '_thr', None) and SRT_POLLER._thr.is_alive())
+            gw_last_payload = (SRT_POLLER.last_payloads.get(gwhost) or {}) if SRT_POLLER else {}
+            body.append('<tr>')
+            body.append('<td><span class="badge text-bg-primary">SRT Gateway</span></td>')
+            body.append(f'<td>{esc(gwname)}</td>')
+            body.append(f'<td>{esc(gwhost)}</td>')
+            body.append(f'<td>{esc(gwport)}</td>')
+            body.append(f'<td>{esc(gw_last_ts)}</td>')
+            body.append(f'<td>{age_badge(gw_age_sec)}</td>')
+            body.append(f'<td>{spark_svg(gwhost, srt=True)}</td>')
+            body.append(f'<td>{esc(gw_running_routes)} route(s) running</td>')
+            body.append('<td>')
+            body.append(f'<a class="btn btn-sm btn-outline-primary" href="/gateway_data_raw?host={gwhost}">Ping /data</a>')
+            body.append('</td>')
+            body.append('</tr>')
         body.extend(['</tbody></table></div>',
                      '<script>\n(function(){\n  var t=null;\n  function tick(){ if(document.getElementById(\'auto\').checked){ location.reload(); } }\n  t=setInterval(tick,10000);\n})();\n</script>',
                      '</body></html>'])
@@ -1142,7 +2664,10 @@ class App:
             cur = db.execute("SELECT id,name,protocol,host,port,api_path,token FROM devices ORDER BY id DESC")
             cols = [c[0] for c in cur.description]
             devices = [dict(zip(cols, r)) for r in cur.fetchall()]
-        return render("devices.html", devices=devices, page_title="Devices", user=current_user())
+            gw_cur = db.execute("SELECT id,name,host,port,protocol FROM srt_gateway_device ORDER BY id DESC")
+            srt_gateways = [dict(zip([c[0] for c in gw_cur.description], r)) for r in gw_cur.fetchall()]
+        return render("devices.html", devices=devices, srt_gateways=srt_gateways,
+                      page_title="Devices", user=current_user())
 
     @require_login
     @cherrypy.expose
@@ -2391,11 +3916,12 @@ async function repoll(){
               const tsEnd = document.getElementById('tsEnd');
               const linkBadges = document.getElementById('linkBadges');
               scrub.max = Math.max(0, samples.length - 1);
-              tsStart.textContent = samples[0].ts;
-              tsEnd.textContent = samples[samples.length-1].ts;
+              function fmtTs(ts){ return ts?ts.replace('T',' ').substring(0,19):ts; }
+              tsStart.textContent = fmtTs(samples[0].ts);
+              tsEnd.textContent = fmtTs(samples[samples.length-1].ts);
               function renderAt(i) {
                 const s = samples[i];
-                tsNow.textContent = s.ts;
+                tsNow.textContent = fmtTs(s.ts);
                 // Move the cursor point to the current GPS position (always reflect latest lat/lng; no warnings)
                 var llc = (s && s.latitude!=null && s.longitude!=null) ? L.latLng(s.latitude, s.longitude) : null;
                 if (llc) {
@@ -2570,7 +4096,10 @@ async function repoll(){
                 "WHERE device_host=? AND ts >= ? AND ts <= ? ORDER BY ts ASC",
                 (host, ts_start_cmp, ts_end_cmp)
             ).fetchall()
+        raw_count = len(rows)
         rows = _filter_logs_for_input(rows, input_index, input_identifier, device_id=host)
+        cherrypy.log(f"[session_events] sid={sid} host={host} input_index={input_index!r} "
+                     f"ident={input_identifier!r} raw={raw_count} filtered={len(rows)}")
         events = [{"ts": r[0], "node": r[1], "level": r[2], "message": r[3]} for r in rows]
         return json.dumps({"ok": True, "events": events}).encode("utf-8")
 
@@ -2864,6 +4393,681 @@ async function repoll(){
 
     @require_login
     @cherrypy.expose
+    def geoip(self, ip=None):
+        """Return cached lat/lng from DB only — no external API calls."""
+        import json as _j
+        cherrypy.response.headers["Content-Type"] = "application/json; charset=utf-8"
+        cherrypy.response.headers["Cache-Control"] = "max-age=60"
+        if not ip or ip in ("0.0.0.0", "localhost", "127.0.0.1"):
+            return _j.dumps({"ok": False, "reason": "invalid ip"}).encode("utf-8")
+        try:
+            with connect_db() as c:
+                row = c.execute(
+                    "SELECT lat, lng, label FROM srt_endpoint_location WHERE address=?", (ip,)
+                ).fetchone()
+            if row and row[0] is not None:
+                return _j.dumps({"ok": True, "ip": ip,
+                                  "lat": row[0], "lng": row[1], "label": row[2] or ip}).encode("utf-8")
+            return _j.dumps({"ok": False, "ip": ip, "reason": "not in DB"}).encode("utf-8")
+        except Exception as e:
+            return _j.dumps({"ok": False, "ip": ip, "reason": str(e)}).encode("utf-8")
+
+    @require_login
+    @cherrypy.expose
+    def gateway_geoip(self, msg=None):
+        """Manual GeoIP editor — all IPs seen across all gateways."""
+        import html as _h
+        def esc(x): return _h.escape('' if x is None else str(x))
+
+        # Collect all IPs seen: from srt_route_sample connections + srt_event
+        seen_ips = set()
+        with connect_db() as c:
+            # IPs from srt_event
+            for row in c.execute('SELECT DISTINCT ip_address FROM srt_event WHERE ip_address IS NOT NULL').fetchall():
+                if row[0] and row[0] not in ('0.0.0.0',): seen_ips.add(row[0])
+            # IPs from srt_connection_sample
+            for row in c.execute('SELECT DISTINCT address FROM srt_connection_sample WHERE address IS NOT NULL').fetchall():
+                if row[0] and row[0] not in ('0.0.0.0',): seen_ips.add(row[0])
+            # Gateway IPs themselves
+            for row in c.execute('SELECT DISTINCT host FROM srt_gateway_device').fetchall():
+                if row[0]: seen_ips.add(row[0])
+            # Existing saved locations
+            saved = {r[0]: (r[1], r[2], r[3]) for r in c.execute(
+                'SELECT address, lat, lng, label FROM srt_endpoint_location'
+            ).fetchall()}
+
+        msg_html = ('<div class="alert alert-success">'+esc(msg)+'</div>') if msg else ''
+
+        rows_html = ''
+        for ip in sorted(seen_ips):
+            s = saved.get(ip)
+            lat_val  = esc(s[0]) if s and s[0] is not None else ''
+            lng_val  = esc(s[1]) if s and s[1] is not None else ''
+            lbl_val  = esc(s[2]) if s and s[2] else ''
+            saved_badge = ('<span class="badge text-bg-success">saved</span>'
+                           if s and s[0] is not None else
+                           '<span class="badge text-bg-secondary">not set</span>')
+            _fid = 'gf_' + esc(ip).replace('.', '_')
+            _del = (
+                '<form method="post" action="/gateway_geoip_delete" class="d-inline ms-2">'
+                '<input type="hidden" name="ip" value="'+esc(ip)+'">'
+                '<button class="btn btn-sm btn-outline-danger" type="submit">Clear</button></form>'
+                if s and s[0] is not None else ''
+            )
+            rows_html += (
+                # Invisible form element outside <tr> — inputs reference it via form= attribute
+                '<form method="post" action="/gateway_geoip_save" id="'+_fid+'"></form>'
+                '<tr>'
+                '<td class="font-monospace small">'+esc(ip)+'</td>'
+                '<td>'+saved_badge+'</td>'
+                '<td class="small text-muted">'+lbl_val+'</td>'
+                '<td><input type="hidden" name="ip" value="'+esc(ip)+'" form="'+_fid+'">'
+                '<input form="'+_fid+'" class="form-control form-control-sm" name="lat" '
+                'value="'+lat_val+'" placeholder="48.8566" style="width:110px"></td>'
+                '<td><input form="'+_fid+'" class="form-control form-control-sm" name="lng" '
+                'value="'+lng_val+'" placeholder="2.3522" style="width:110px"></td>'
+                '<td><input form="'+_fid+'" class="form-control form-control-sm" name="label" '
+                'value="'+lbl_val+'" placeholder="Paris, France" style="width:160px"></td>'
+                '<td><button form="'+_fid+'" class="btn btn-sm btn-primary" type="submit">Save</button>'
+                + _del +
+                '</td>'
+                '</tr>'
+            )
+        if not rows_html:
+            rows_html = '<tr><td colspan="7" class="text-muted text-center p-4">No IPs detected yet. Start a route.</td></tr>'
+
+        html_body = (
+            '<!doctype html><html><head>'
+            '<meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            '<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">'
+            '<title>GeoIP — StreamPilot</title>'
+            '</head><body class="p-4">'
+            '<div class="d-flex justify-content-between align-items-center mb-3">'
+            '<h1 class="h4 m-0">GeoIP — Manual coordinates</h1>'
+            '<a class="btn btn-outline-secondary" href="/gateway_dashboard">← SRT Gateway</a>'
+            '</div>'
+            + msg_html +
+            '<p class="text-muted small mb-3">Enter GPS coordinates for each detected IP. '
+            'These are used to plot source, gateway and client positions on the route maps.</p>'
+            '<div class="table-responsive">'
+            '<table class="table table-sm align-middle">'
+            '<thead class="table-light"><tr>'
+            '<th>IP</th><th>Status</th><th>Label</th>'
+            '<th>Latitude</th><th>Longitude</th><th>Description</th><th>Action</th>'
+            '</tr></thead>'
+            '<tbody>'+rows_html+'</tbody>'
+            '</table></div>'
+            '</body></html>'
+        )
+        cherrypy.response.headers['Content-Type'] = 'text/html; charset=utf-8'
+        return html_body.encode('utf-8')
+
+    @require_login
+    @cherrypy.expose
+    def gateway_geoip_save(self, ip=None, lat=None, lng=None, label=None):
+        def _s(v): return (v[-1] if isinstance(v, list) else (v or '')).strip()
+        ip = _s(ip); lat = _s(lat); lng = _s(lng); label = _s(label)
+        if ip:
+            try:
+                lat_f = float(lat) if lat else None
+                lng_f = float(lng) if lng else None
+            except Exception:
+                raise cherrypy.HTTPRedirect('/gateway_geoip?msg=Invalid+coordinates')
+            with connect_db() as c:
+                c.execute(
+                    'INSERT OR REPLACE INTO srt_endpoint_location (address, label, lat, lng) '
+                    'VALUES (?,?,?,?)',
+                    (ip, label or None, lat_f, lng_f)
+                )
+        raise cherrypy.HTTPRedirect('/gateway_geoip?msg=Saved')
+
+    @require_login
+    @cherrypy.expose
+    def gateway_geoip_delete(self, ip=None):
+        if ip:
+            with connect_db() as c:
+                c.execute('DELETE FROM srt_endpoint_location WHERE address=?', (ip,))
+        raise cherrypy.HTTPRedirect('/gateway_geoip?msg=Cleared')
+
+
+    @require_login
+    @cherrypy.expose
+    def geoip_all(self):
+        """Return all saved IP coordinates as a JSON dict {ip: {lat,lng,label}}."""
+        import json as _j
+        cherrypy.response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        cherrypy.response.headers['Cache-Control'] = 'no-cache'
+        try:
+            with connect_db() as c:
+                rows = c.execute(
+                    'SELECT address, lat, lng, label FROM srt_endpoint_location '
+                    'WHERE lat IS NOT NULL AND lng IS NOT NULL'
+                ).fetchall()
+            result = {r[0]: {'lat': r[1], 'lng': r[2], 'label': r[3] or r[0]} for r in rows}
+        except Exception as e:
+            cherrypy.log(f'[geoip_all] error: {e}')
+            result = {}
+        return _j.dumps(result).encode('utf-8')
+
+
+    @require_login
+    @cherrypy.expose
+    def gateway_report_create(self, host=None, route_id=None, route_name=None,
+                               name=None, started_at=None, ended_at=None,
+                               tz_offset=None):
+        """Create a named report session.
+        Dates are stored as LOCAL TIME (as entered by user).
+        tz_offset (JS getTimezoneOffset, e.g. -60 for UTC+1) is stored
+        so we can convert to/from UTC when querying samples.
+        """
+        from datetime import datetime as _dtr
+        def _s(v): return ((v[-1] if isinstance(v, list) else v) or '').strip()
+        host       = _s(host); route_id = _s(route_id); route_name = _s(route_name)
+        name       = _s(name) or 'Report'
+        started_at = _s(started_at).replace('T', ' ')
+        ended_at   = _s(ended_at).replace('T', ' ')
+        try: tz_min = int(_s(tz_offset))
+        except Exception: tz_min = 0
+        if not (host and route_id and started_at and ended_at):
+            raise cherrypy.HTTPRedirect(
+                f'/gateway_route?host={host}&route_id={route_id}&msg=Missing+fields')
+        try:
+            _dtr.strptime(started_at[:16], '%Y-%m-%d %H:%M')
+            _dtr.strptime(ended_at[:16],   '%Y-%m-%d %H:%M')
+        except Exception:
+            raise cherrypy.HTTPRedirect(
+                f'/gateway_route?host={host}&route_id={route_id}&msg=Invalid+dates')
+        created_at = _dtr.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        with connect_db() as c:
+            c.execute(
+                'INSERT INTO srt_report_session '
+                '(device_host, route_id, route_name, name, started_at, ended_at, created_at, tz_offset) '
+                'VALUES (?,?,?,?,?,?,?,?)',
+                (host, route_id, route_name or route_id, name,
+                 started_at, ended_at, created_at, tz_min)
+            )
+        raise cherrypy.HTTPRedirect(
+            f'/gateway_route?host={host}&route_id={route_id}&tab=tabReports&msg=Report+created')
+
+    @require_login
+    @cherrypy.expose
+    def gateway_reports_json(self, host=None, route_id=None):
+        """Return list of report sessions for a route with sample/event counts."""
+        import json as _j
+        cherrypy.response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        if not host or not route_id:
+            return _j.dumps({'ok': False}).encode('utf-8')
+        with connect_db() as c:
+            rows = c.execute(
+                'SELECT id, name, started_at, ended_at, created_at '
+                'FROM srt_report_session '
+                'WHERE device_host=? AND route_id=? ORDER BY id DESC',
+                (host, route_id)
+            ).fetchall()
+            reports = []
+            for r in rows:
+                rid, name, ts_s, ts_e, ts_c = r
+                sc = c.execute(
+                    'SELECT COUNT(*) FROM srt_route_sample '
+                    'WHERE device_host=? AND route_id=? AND ts >= ? AND ts <= ?',
+                    (host, route_id, ts_s, ts_e)
+                ).fetchone()[0]
+                ec = c.execute(
+                    'SELECT COUNT(*) FROM srt_event '
+                    'WHERE device_host=? AND route_id=? AND ts >= ? AND ts <= ?',
+                    (host, route_id, ts_s, ts_e)
+                ).fetchone()[0]
+                reports.append({
+                    'id': rid, 'name': name,
+                    'started_at': ts_s, 'ended_at': ts_e,
+                    'created_at': ts_c or '', 'sample_count': sc, 'event_count': ec
+                })
+        return _j.dumps({'ok': True, 'reports': reports}).encode('utf-8')
+
+
+    @require_login
+    @cherrypy.expose
+    def gateway_report_delete(self, report_id=None, host=None, route_id=None):
+        """Delete a report session."""
+        if report_id:
+            with connect_db() as c:
+                c.execute('DELETE FROM srt_report_session WHERE id=?', (report_id,))
+        raise cherrypy.HTTPRedirect(
+            f'/gateway_route?host={host}&route_id={route_id}&tab=tabReports')
+
+    @require_login
+    @cherrypy.expose
+    def gateway_report_pdf(self, report_id=None, tz_offset=None):
+        """Generate a PDF report for a SRT report session.
+        Dates in DB: started_at/ended_at are LOCAL TIME, tz_offset is JS getTimezoneOffset().
+        Gateway samples are in UTC. We convert local→UTC for the query.
+        The PDF shows both local time and UTC.
+        """
+        import io
+        from datetime import datetime as _dtr, timedelta as _tdd
+        if not report_id:
+            raise cherrypy.HTTPRedirect('/gateway_logs')
+        with connect_db() as c:
+            rep = c.execute(
+                'SELECT id, device_host, route_id, route_name, name, '
+                'started_at, ended_at, tz_offset '
+                'FROM srt_report_session WHERE id=?', (int(report_id),)
+            ).fetchone()
+        if not rep:
+            raise cherrypy.HTTPRedirect('/gateway_logs')
+        rid, host, route_id, route_name, rep_name, ts_start_local, ts_end_local, tz_offset_min = rep
+        tz_offset_min = tz_offset_min or 0
+
+        # ── UTC conversion ─────────────────────────────────────────────────
+        # tz_offset_min = JS getTimezoneOffset() = UTC - local (minutes)
+        # Paris UTC+1: tz_offset_min = -60 → local = UTC + 60min → UTC = local - 60min
+        # To go from local → UTC: add tz_offset_min
+        def local_to_utc(ts_str):
+            dt = _dtr.strptime(str(ts_str)[:16], '%Y-%m-%d %H:%M')
+            return (dt + _tdd(minutes=tz_offset_min)).strftime('%Y-%m-%d %H:%M:%S')
+
+        def utc_to_local(ts_str):
+            dt = _dtr.strptime(str(ts_str)[:19], '%Y-%m-%d %H:%M:%S')
+            return (dt - _tdd(minutes=tz_offset_min)).strftime('%Y-%m-%d %H:%M:%S')
+
+        ts_start_utc = local_to_utc(ts_start_local)
+        ts_end_utc   = local_to_utc(ts_end_local)
+
+        # Timezone label e.g. "UTC+1" or "UTC-5"
+        tz_hours = -tz_offset_min / 60
+        tz_label = f"UTC{'+' if tz_hours >= 0 else ''}{tz_hours:g}"
+
+        with connect_db() as c:
+            route_samples = c.execute(
+                'SELECT ts, total_bitrate_mbps, src_rtt_ms, src_loss_pct, active_connections '
+                'FROM srt_route_sample WHERE device_host=? AND route_id=? '
+                'AND ts >= ? AND ts <= ? ORDER BY ts ASC',
+                (host, route_id, ts_start_utc, ts_end_utc)
+            ).fetchall()
+            client_samples_raw = c.execute(
+                'SELECT ts, address, direction, bitrate_mbps, rtt_ms, loss_pct, buffer_ms '
+                'FROM srt_connection_sample WHERE device_host=? AND route_id=? '
+                'AND ts >= ? AND ts <= ? ORDER BY ts ASC',
+                (host, route_id, ts_start_utc, ts_end_utc)
+            ).fetchall()
+            events = c.execute(
+                'SELECT ts, event_type, detail, ip_address FROM srt_event '
+                'WHERE device_host=? AND route_id=? AND ts >= ? AND ts <= ? ORDER BY ts ASC',
+                (host, route_id, ts_start_utc, ts_end_utc)
+            ).fetchall()
+            gw = c.execute('SELECT name FROM srt_gateway_device WHERE host=?', (host,)).fetchone()
+        gw_name  = gw[0] if gw else host
+        generated_utc   = _dtr.utcnow().strftime('%d/%m/%Y %H:%M:%S UTC')
+
+        from collections import defaultdict
+        client_data    = defaultdict(list)      # addr → [(ts,br,rtt,loss)]
+        client_srt_ver = {}                       # addr → latest srt_version
+        for row in client_samples_raw:
+            ts, addr, direction, br, rtt, loss, buf = row[:7]
+            srt_ver = row[7] if len(row) > 7 else ''
+            if addr:
+                client_data[addr].append((ts, br, rtt, loss))
+                if srt_ver:
+                    client_srt_ver[addr] = srt_ver
+
+        try:
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib import colors
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.lib.units import mm
+            from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
+                                            Table, TableStyle, HRFlowable, KeepTogether)
+            from reportlab.graphics.shapes import Drawing, PolyLine, String, Rect, Line
+
+            styles = getSampleStyleSheet()
+            def ps(name, **kw):
+                return ParagraphStyle(name, parent=styles['Normal'], **kw)
+
+            buf_io = io.BytesIO()
+            doc = SimpleDocTemplate(buf_io, pagesize=A4,
+                leftMargin=15*mm, rightMargin=15*mm,
+                topMargin=15*mm, bottomMargin=15*mm)
+
+            story = []
+            story.append(Paragraph(
+                f'SRT Report — {rep_name}',
+                ps('h1', fontSize=16, fontName='Helvetica-Bold', spaceAfter=3)))
+            story.append(Paragraph(
+                f'Route: {route_name} &nbsp;|&nbsp; Gateway: {gw_name} ({host})<br/>'
+                f'Period ({tz_label}): {ts_start_local[:16]} → {ts_end_local[:16]}<br/>'
+                f'Period (UTC): {ts_start_utc[:16]} → {ts_end_utc[:16]}<br/>'
+                f'Generated: {generated_utc}',
+                ps('meta', fontSize=8, textColor=colors.grey, spaceAfter=6)))
+            story.append(HRFlowable(width='100%', thickness=0.5,
+                                    color=colors.lightgrey, spaceAfter=8))
+
+            # ── Mini graph helper ─────────────────────────────────────────
+            def mini_graph(samples_xy, w_mm=170, h_mm=36,
+                           color=colors.HexColor('#0d6efd'), y_label=''):
+                """Draw a graph with time-axis labels every 30 min (local + UTC)."""
+                from datetime import datetime as _dg, timedelta as _tg
+                vals = [v for _, v in samples_xy if v is not None]
+                if not vals:
+                    return Paragraph('<i>No data</i>',
+                                     ps('nd', fontSize=8, textColor=colors.grey))
+                # Reserve bottom area for time labels (local + UTC = 2 rows × 6pt)
+                LABEL_H = 16  # points reserved for labels (local + UTC)
+                W = w_mm*mm; H = h_mm*mm
+                PLOT_H = H - LABEL_H
+                d = Drawing(W, H)
+                d.add(Rect(0, LABEL_H, W, PLOT_H,
+                           fillColor=colors.HexColor('#f8f9fa'),
+                           strokeColor=colors.lightgrey, strokeWidth=0.3))
+                mn, mx = min(vals), max(vals); rng = mx - mn or 1
+                n = len(samples_xy)
+                # Build ts → x mapping from first/last timestamps
+                ts_list = [s[0] for s in samples_xy if s[0]]
+                t0 = ts_list[0] if ts_list else None
+                t1 = ts_list[-1] if ts_list else None
+                def ts_to_x(ts_str):
+                    try:
+                        dt = _dg.strptime(str(ts_str)[:19], '%Y-%m-%d %H:%M:%S')
+                        dt0 = _dg.strptime(str(t0)[:19], '%Y-%m-%d %H:%M:%S')
+                        dt1 = _dg.strptime(str(t1)[:19], '%Y-%m-%d %H:%M:%S')
+                        span = (dt1 - dt0).total_seconds() or 1
+                        return 6 + (W - 12) * (dt - dt0).total_seconds() / span
+                    except Exception:
+                        return None
+                # Draw polyline — split on gaps to avoid false continuity
+                # Detect gap threshold: if ts gap > 3× median interval, break line
+                from datetime import datetime as _dgap
+                from reportlab.graphics.shapes import PolyLine as PL
+                # Compute median sample interval to set gap threshold
+                ts_valid = [s[0] for s in samples_xy if s[0] and s[1] is not None]
+                if len(ts_valid) >= 2:
+                    try:
+                        dts = []
+                        for _i in range(1, min(20, len(ts_valid))):
+                            _a = _dgap.strptime(str(ts_valid[_i-1])[:19], '%Y-%m-%d %H:%M:%S')
+                            _b = _dgap.strptime(str(ts_valid[_i])[:19],   '%Y-%m-%d %H:%M:%S')
+                            dts.append(abs((_b - _a).total_seconds()))
+                        dts.sort()
+                        _med_interval = dts[len(dts)//2] if dts else 10
+                        _gap_threshold = max(60, _med_interval * 4)
+                    except Exception:
+                        _gap_threshold = 60
+                else:
+                    _gap_threshold = 60
+
+                # Build list of segments, breaking on gaps
+                segments = []
+                current_seg = []
+                prev_ts_dt = None
+                for i, (ts, v) in enumerate(samples_xy):
+                    if v is None: continue
+                    x_pos = ts_to_x(ts)
+                    if x_pos is None:
+                        x_pos = 6 + (W-12)*i/max(n-1, 1)
+                    y_pos = LABEL_H + 4 + (PLOT_H-8)*(v-mn)/rng
+                    # Check for gap
+                    if prev_ts_dt and ts:
+                        try:
+                            cur_dt = _dgap.strptime(str(ts)[:19], '%Y-%m-%d %H:%M:%S')
+                            gap_sec = (cur_dt - prev_ts_dt).total_seconds()
+                            if gap_sec > _gap_threshold:
+                                if len(current_seg) >= 4:
+                                    segments.append(current_seg)
+                                current_seg = []
+                        except Exception:
+                            pass
+                    current_seg.extend([x_pos, y_pos])
+                    if ts:
+                        try:
+                            prev_ts_dt = _dgap.strptime(str(ts)[:19], '%Y-%m-%d %H:%M:%S')
+                        except Exception:
+                            pass
+                if len(current_seg) >= 4:
+                    segments.append(current_seg)
+                for seg in segments:
+                    d.add(PL(seg, strokeColor=color, strokeWidth=1.2, strokeLineCap=1))
+                # Y-axis labels
+                d.add(String(2, H-8, f'{mx:.1f}', fontSize=5, fillColor=colors.grey))
+                d.add(String(2, LABEL_H+3, f'{mn:.1f}', fontSize=5, fillColor=colors.grey))
+                if y_label:
+                    d.add(String(W-2, (H+LABEL_H)/2, y_label, fontSize=5,
+                                 fillColor=colors.grey, textAnchor='end'))
+                # ── Time axis labels ─────────────────────────────────
+                if t0 and t1:
+                    try:
+                        dt0 = _dg.strptime(str(t0)[:19], '%Y-%m-%d %H:%M:%S')
+                        dt1 = _dg.strptime(str(t1)[:19], '%Y-%m-%d %H:%M:%S')
+                        span_sec = (dt1 - dt0).total_seconds()
+                        # Choose interval based on span
+                        if   span_sec <= 600:    _interval_min = 1
+                        elif span_sec <= 1800:   _interval_min = 5
+                        elif span_sec <= 5400:   _interval_min = 10
+                        elif span_sec <= 10800:  _interval_min = 15
+                        elif span_sec <= 21600:  _interval_min = 30
+                        else:                    _interval_min = 60
+
+                        def _draw_tick(tick_dt, x_t, is_boundary=False):
+                            """Draw a tick mark with local+UTC labels."""
+                            if x_t is None: return
+                            # Clamp to drawing area
+                            x_t = max(6.0, min(float(W) - 6.0, float(x_t)))
+                            # Vertical grid line (skip at edges)
+                            if 8 < x_t < W - 8:
+                                d.add(Line(x_t, LABEL_H, x_t, float(H),
+                                           strokeColor=colors.HexColor('#cccccc'),
+                                           strokeWidth=0.4))
+                            # Local time (top label row)
+                            loc_dt = tick_dt + _tg(minutes=-tz_offset_min)
+                            lbl_loc = loc_dt.strftime('%H:%M')
+                            lbl_utc = tick_dt.strftime('%H:%M') + 'Z'
+                            anchor = 'middle'
+                            if x_t < 15:   anchor = 'start'
+                            if x_t > W-15: anchor = 'end'
+                            d.add(String(x_t, LABEL_H - 3,
+                                         lbl_loc, fontSize=5,
+                                         fillColor=colors.HexColor('#0a58ca'),
+                                         textAnchor=anchor))
+                            d.add(String(x_t, 1.5,
+                                         lbl_utc, fontSize=4.5,
+                                         fillColor=colors.HexColor('#666666'),
+                                         textAnchor=anchor))
+
+                        # Always draw start and end labels
+                        _draw_tick(dt0, ts_to_x(dt0.strftime('%Y-%m-%d %H:%M:%S')), True)
+                        _draw_tick(dt1, ts_to_x(dt1.strftime('%Y-%m-%d %H:%M:%S')), True)
+
+                        # Draw intermediate ticks
+                        minutes = dt0.minute + dt0.second / 60.0
+                        offset_to_next = (_interval_min - minutes % _interval_min) % _interval_min
+                        if offset_to_next == 0:
+                            offset_to_next = _interval_min  # skip dt0, already drawn
+                        tick = dt0 + _tg(minutes=offset_to_next)
+                        while tick < dt1:
+                            x_t = ts_to_x(tick.strftime('%Y-%m-%d %H:%M:%S'))
+                            _draw_tick(tick, x_t)
+                            tick += _tg(minutes=_interval_min)
+                    except Exception as _te:
+                        pass  # never crash on label drawing
+                return d
+
+            def stats_row(lst):
+                if not lst: return '—', '—', '—'
+                fmt = lambda v: f'{v:.2f}'
+                return fmt(sum(lst)/len(lst)), fmt(max(lst)), fmt(min(lst))
+
+            def section_graphs(samples, label, color):
+                elems = []
+                for title, idx, col, lbl in [
+                    (f'{label} — Bitrate (Mb/s)',  1, color,                           'Mb/s'),
+                    (f'{label} — RTT (ms)',         2, colors.HexColor('#198754'),      'ms'),
+                    (f'{label} — Loss (%)',          3, colors.HexColor('#dc3545'),      '%'),
+                ]:
+                    elems.append(Paragraph(title, ps('gh'+label+str(idx),
+                        fontSize=9, fontName='Helvetica-Bold', spaceBefore=3, spaceAfter=2)))
+                    h = 20 if idx == 3 else 28
+                    elems.append(mini_graph([(r[0], r[idx]) for r in samples],
+                                            color=col, y_label=lbl, h_mm=h))
+                brs   = [r[1] for r in samples if r[1] is not None]
+                rtts  = [r[2] for r in samples if r[2] is not None]
+                losses= [r[3] for r in samples if r[3] is not None]
+                tbl = Table(
+                    [['Metric', 'Avg', 'Max', 'Min'],
+                     ['Bitrate (Mb/s)', *stats_row(brs)],
+                     ['RTT (ms)',       *stats_row(rtts)],
+                     ['Loss (%)',       *stats_row(losses)]],
+                    colWidths=[50*mm, 35*mm, 35*mm, 35*mm])
+                tbl.setStyle(TableStyle([
+                    ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#f0f0f0')),
+                    ('FONTNAME',   (0,0), (-1,0), 'Helvetica-Bold'),
+                    ('FONTSIZE',   (0,0), (-1,-1), 8),
+                    ('GRID',       (0,0), (-1,-1), 0.3, colors.lightgrey),
+                    ('TOPPADDING', (0,0), (-1,-1), 3),
+                    ('BOTTOMPADDING', (0,0), (-1,-1), 3),
+                ]))
+                elems.extend([Spacer(1, 2*mm), tbl])
+                return elems
+
+            # ── Source ───────────────────────────────────────────────────
+            # Fetch latest source SRT version from live payload
+            _src_srt_ver = ''
+            if SRT_POLLER:
+                _lp = (SRT_POLLER.last_payloads.get(host) or {}).get(route_id, {})
+                _src_conns = (_lp.get('source') or {}).get('connections') or []
+                if _src_conns:
+                    _src_srt_ver = _src_conns[0].get('srt_version', '')
+                if not _src_srt_ver:
+                    _src_srt_ver = (_lp.get('source') or {}).get('srt_version', '')
+            if route_samples:
+                _src_title = 'Source' + (f' — SRT {_src_srt_ver}' if _src_srt_ver else '')
+                story.append(Paragraph(_src_title,
+                    ps('sec', fontSize=11, fontName='Helvetica-Bold',
+                       spaceBefore=4, spaceAfter=3,
+                       textColor=colors.HexColor('#0d6efd'))))
+                story.extend(section_graphs(
+                    [(r[0], r[1], r[2], r[3]) for r in route_samples],
+                    'Source', colors.HexColor('#0d6efd')))
+                story.append(Spacer(1, 6*mm))
+            else:
+                story.append(Paragraph('<i>No source samples in this period.</i>',
+                    ps('ns', fontSize=9, textColor=colors.grey, spaceAfter=6)))
+
+            # ── Clients ───────────────────────────────────────────────────
+            if client_data:
+                story.append(HRFlowable(width='100%', thickness=0.5,
+                                        color=colors.lightgrey, spaceAfter=4))
+                story.append(Paragraph(f'Clients ({len(client_data)})',
+                    ps('sec2', fontSize=11, fontName='Helvetica-Bold',
+                       spaceBefore=4, spaceAfter=3,
+                       textColor=colors.HexColor('#fd7e14'))))
+                cli_colors = ['#fd7e14','#6610f2','#0dcaf0','#20c997',
+                              '#d63384','#198754','#ffc107','#0d6efd']
+                for ci, (addr, csamples) in enumerate(sorted(client_data.items())):
+                    col = colors.HexColor(cli_colors[ci % len(cli_colors)])
+                    _cli_ver = client_srt_ver.get(addr, '')
+                    _cli_title = f'Client: {addr}' + (f' — SRT {_cli_ver}' if _cli_ver else '')
+                    cli_elems = [Paragraph(_cli_title,
+                        ps(f'cli{ci}', fontSize=9, fontName='Helvetica-Bold',
+                           spaceBefore=4, spaceAfter=2, textColor=col))]
+                    cli_elems.extend(section_graphs(csamples, addr, col))
+                    cli_elems.append(Spacer(1, 4*mm))
+                    story.append(KeepTogether(cli_elems[:3]))
+                    story.extend(cli_elems[3:])
+                story.append(Spacer(1, 4*mm))
+            else:
+                story.append(Paragraph('<i>No client samples in this period.</i>',
+                    ps('nc', fontSize=9, textColor=colors.grey, spaceAfter=4)))
+
+            # ── Events — dual timezone columns ────────────────────────────
+            story.append(HRFlowable(width='100%', thickness=0.5,
+                                    color=colors.lightgrey, spaceAfter=4))
+            story.append(Paragraph(f'Events ({len(events)})',
+                ps('ev', fontSize=11, fontName='Helvetica-Bold',
+                   spaceBefore=4, spaceAfter=3)))
+            if events:
+                cs = ps('cs', fontSize=7)
+                ev_data = [[f'{tz_label}', 'UTC', 'Event', 'Detail', 'IP']]
+                for ts_utc, etype, detail, ip in events:
+                    ts_loc = utc_to_local(str(ts_utc)[:19]) if ts_utc else ''
+                    ev_data.append([
+                        Paragraph(str(ts_loc)[:16], cs),
+                        Paragraph(str(ts_utc)[:16], cs),
+                        Paragraph(etype or '', cs),
+                        Paragraph(detail or '', cs),
+                        Paragraph(ip or '', cs),
+                    ])
+                evtbl = Table(ev_data,
+                              colWidths=[28*mm, 28*mm, 28*mm, 62*mm, 24*mm],
+                              repeatRows=1)
+                evtbl.setStyle(TableStyle([
+                    ('BACKGROUND',    (0,0), (-1,0), colors.HexColor('#f0f0f0')),
+                    ('FONTNAME',      (0,0), (-1,0), 'Helvetica-Bold'),
+                    ('FONTSIZE',      (0,0), (-1,0), 7),
+                    ('GRID',          (0,0), (-1,-1), 0.3, colors.HexColor('#dddddd')),
+                    ('ROWBACKGROUNDS',(0,1), (-1,-1),
+                     [colors.white, colors.HexColor('#fafafa')]),
+                    ('VALIGN',        (0,0), (-1,-1), 'TOP'),
+                    ('TOPPADDING',    (0,0), (-1,-1), 2),
+                    ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+                    ('LEFTPADDING',   (0,0), (-1,-1), 3),
+                ]))
+                story.append(evtbl)
+            else:
+                story.append(Paragraph('<i>No events in this period.</i>',
+                    ps('ne', fontSize=9, textColor=colors.grey)))
+
+            story.append(Spacer(1, 6*mm))
+            story.append(Paragraph('StreamPilot — SRT Gateway Report',
+                ps('footer', fontSize=7, textColor=colors.grey)))
+
+            doc.build(story)
+            pdf_bytes = buf_io.getvalue()
+            safe = rep_name.replace(' ', '_').replace('/', '-')[:40]
+            cherrypy.response.headers['Content-Type'] = 'application/pdf'
+            cherrypy.response.headers['Content-Disposition'] =                 f'attachment; filename="report_{safe}.pdf"'
+            return pdf_bytes
+
+        except ImportError:
+            raise cherrypy.HTTPError(500, 'reportlab not installed')
+        except Exception as _e:
+            cherrypy.log(f'[gateway_report_pdf] error: {_e}')
+            raise cherrypy.HTTPError(500, str(_e))
+
+
+    @require_login
+    @cherrypy.expose
+    def gateway_report_delete(self, report_id=None, host=None, route_id=None):
+        """Delete a report session."""
+        if report_id:
+            with connect_db() as c:
+                c.execute('DELETE FROM srt_report_session WHERE id=?', (report_id,))
+        raise cherrypy.HTTPRedirect(
+            f'/gateway_route?host={host}&route_id={route_id}&tab=tabReports')
+
+    @require_login
+    @cherrypy.expose
+    def gateway_slack_status(self, host=None):
+        import json as _j
+        cherrypy.response.headers["Content-Type"] = "application/json; charset=utf-8"
+        if not host:
+            return _j.dumps({"configured": False}).encode("utf-8")
+        try:
+            with connect_db() as c:
+                sc = c.execute("SELECT webhook_url FROM slack_config WHERE id=1").fetchone()
+                if not (sc and sc[0] and sc[0].strip()):
+                    return _j.dumps({"configured": False}).encode("utf-8")
+                gw = c.execute("SELECT id FROM srt_gateway_device WHERE host=?", (host,)).fetchone()
+                if not gw:
+                    return _j.dumps({"configured": False}).encode("utf-8")
+                gs = c.execute("SELECT notify_paused FROM srt_gw_slack WHERE gw_id=?",
+                               (gw[0],)).fetchone()
+                paused = bool(gs and gs[0])
+        except Exception:
+            return _j.dumps({"configured": False}).encode("utf-8")
+        return _j.dumps({"configured": True, "paused": paused}).encode("utf-8")
+
+
+    @require_login
+    @cherrypy.expose
     def slack_status(self, device_id=None):
         import json
         cherrypy.response.headers["Content-Type"] = "application/json; charset=utf-8"
@@ -2983,6 +5187,91 @@ async function repoll(){
               </div>
             </div>'''
 
+        # SRT Gateway notification settings
+        gw_html = ''
+        with connect_db() as _cgwdb:
+            gw_rows = _cgwdb.execute(
+                'SELECT id, name, host FROM srt_gateway_device ORDER BY id ASC'
+            ).fetchall()
+        for gid, gname, ghost in gw_rows:
+            with connect_db() as _cgs:
+                _cgs.execute('INSERT OR IGNORE INTO srt_gw_slack(gw_id) VALUES(?)', (gid,))
+                gs = dict(zip(
+                    ['notify_source','notify_client','notify_paused',
+                     'thr_bitrate_min','thr_loss_max','thr_lost_max',
+                     'thr_dropped_max','thr_retransmit_max'],
+                    _cgs.execute(
+                        'SELECT notify_source,notify_client,notify_paused,'
+                        'thr_bitrate_min,thr_loss_max,thr_lost_max,'
+                        'thr_dropped_max,thr_retransmit_max '
+                        'FROM srt_gw_slack WHERE gw_id=?', (gid,)
+                    ).fetchone() or (1,1,0,0,0,0,0,0)
+                ))
+            gpaused = bool(gs.get('notify_paused'))
+            gbadge = ('<span class="badge text-bg-danger ms-2">Notifications OFF</span>'
+                      if gpaused else
+                      '<span class="badge text-bg-success ms-2">Notifications ON</span>')
+            gpause_btn = (
+                f'''<form class="d-inline ms-2" method="post" action="/settings_gw_resume">
+                  <input type="hidden" name="gw_id" value="{gid}">
+                  <button class="btn btn-sm btn-success" type="submit">Resume</button>
+                </form>''' if gpaused else
+                f'''<form class="d-inline ms-2" method="post" action="/settings_gw_pause">
+                  <input type="hidden" name="gw_id" value="{gid}">
+                  <button class="btn btn-sm btn-danger" type="submit">Pause</button>
+                </form>''')
+            gw_html += f'''
+            <div class="card mb-3">
+              <div class="card-header d-flex align-items-center">
+                <strong>{esc(gname)}</strong>
+                <span class="text-muted fw-normal small ms-2">({esc(ghost)})</span>
+                {gbadge}{gpause_btn}
+              </div>
+              <div class="card-body">
+                <form method="post" action="/settings_gw_save">
+                  <input type="hidden" name="gw_id" value="{gid}">
+                  <div class="row g-2 mb-3">
+                    <div class="col-auto"><div class="form-check">
+                      <input class="form-check-input" type="checkbox" name="notify_source" id="gs_{gid}" {chk(gs.get('notify_source',1))}>
+                      <label class="form-check-label" for="gs_{gid}">Source connected / disconnected</label>
+                    </div></div>
+                    <div class="col-auto"><div class="form-check">
+                      <input class="form-check-input" type="checkbox" name="notify_client" id="gc_{gid}" {chk(gs.get('notify_client',1))}>
+                      <label class="form-check-label" for="gc_{gid}">Client connected / disconnected</label>
+                    </div></div>
+                  </div>
+                  <div class="row g-2 mb-3">
+                    <div class="col-md-3">
+                      <label class="form-label small">Bitrate min (Mb/s, 0=off)</label>
+                      <input class="form-control form-control-sm" type="number" step="0.1" min="0"
+                             name="thr_bitrate_min" value="{esc(gs.get('thr_bitrate_min') or 0)}">
+                    </div>
+                    <div class="col-md-3">
+                      <label class="form-label small">Loss max (%, 0=off)</label>
+                      <input class="form-control form-control-sm" type="number" step="0.1" min="0"
+                             name="thr_loss_max" value="{esc(gs.get('thr_loss_max') or 0)}">
+                    </div>
+                    <div class="col-md-2">
+                      <label class="form-label small">Lost pkts max (0=off)</label>
+                      <input class="form-control form-control-sm" type="number" min="0"
+                             name="thr_lost_max" value="{esc(gs.get('thr_lost_max') or 0)}">
+                    </div>
+                    <div class="col-md-2">
+                      <label class="form-label small">Dropped pkts max (0=off)</label>
+                      <input class="form-control form-control-sm" type="number" min="0"
+                             name="thr_dropped_max" value="{esc(gs.get('thr_dropped_max') or 0)}">
+                    </div>
+                    <div class="col-md-2">
+                      <label class="form-label small">Retransmit max (b/s, 0=off)</label>
+                      <input class="form-control form-control-sm" type="number" min="0"
+                             name="thr_retransmit_max" value="{esc(gs.get('thr_retransmit_max') or 0)}">
+                    </div>
+                  </div>
+                  <button class="btn btn-sm btn-primary" type="submit">Save</button>
+                </form>
+              </div>
+            </div>'''
+
         msg_html = f'<div class="alert alert-success">{esc(msg)}</div>' if msg else ''
         body = f'''<!doctype html><html><head>
           <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -3023,6 +5312,8 @@ async function repoll(){
           </div>
           <h2 class="h5 mb-3">Per-device settings</h2>
           {dev_html or '<div class="text-muted">No devices configured.</div>'}
+          <h2 class="h5 mb-3 mt-4">SRT Gateway notifications</h2>
+          {gw_html or '<div class="text-muted">No SRT Gateway configured.</div>'}
         </body></html>'''
         cherrypy.response.headers['Content-Type'] = 'text/html; charset=utf-8'
         return body.encode('utf-8')
@@ -3097,7 +5388,59 @@ async function repoll(){
         raise cherrypy.HTTPRedirect("/settings?msg=Notifications+resumed")
 
 
+    @require_login
+    @cherrypy.expose
+    def settings_gw_save(self, gw_id=None, notify_source=None, notify_client=None,
+                          thr_bitrate_min='0', thr_loss_max='0', thr_lost_max='0',
+                          thr_dropped_max='0', thr_retransmit_max='0'):
+        if not gw_id:
+            raise cherrypy.HTTPRedirect("/settings")
+        try: gid = int(gw_id)
+        except Exception: raise cherrypy.HTTPRedirect("/settings")
+        ns = 1 if notify_source else 0
+        nc = 1 if notify_client  else 0
+        def _f(v):
+            try: return max(0.0, float(v or 0))
+            except: return 0.0
+        with connect_db() as c:
+            c.execute("INSERT OR IGNORE INTO srt_gw_slack(gw_id) VALUES(?)", (gid,))
+            c.execute("UPDATE srt_gw_slack SET notify_source=?,notify_client=?,"
+                      "thr_bitrate_min=?,thr_loss_max=?,thr_lost_max=?,"
+                      "thr_dropped_max=?,thr_retransmit_max=? WHERE gw_id=?",
+                      (ns, nc, _f(thr_bitrate_min), _f(thr_loss_max), _f(thr_lost_max),
+                       _f(thr_dropped_max), _f(thr_retransmit_max), gid))
+        raise cherrypy.HTTPRedirect("/settings?msg=SRT+Gateway+settings+saved")
+
+    @require_login
+    @cherrypy.expose
+    def settings_gw_pause(self, gw_id=None):
+        if not gw_id: raise cherrypy.HTTPRedirect("/settings")
+        try: gid = int(gw_id)
+        except Exception: raise cherrypy.HTTPRedirect("/settings")
+        with connect_db() as c:
+            c.execute("INSERT OR IGNORE INTO srt_gw_slack(gw_id) VALUES(?)", (gid,))
+            c.execute("UPDATE srt_gw_slack SET notify_paused=1 WHERE gw_id=?", (gid,))
+        raise cherrypy.HTTPRedirect("/settings?msg=SRT+Gateway+notifications+paused")
+
+    @require_login
+    @cherrypy.expose
+    def settings_gw_resume(self, gw_id=None):
+        if not gw_id: raise cherrypy.HTTPRedirect("/settings")
+        try: gid = int(gw_id)
+        except Exception: raise cherrypy.HTTPRedirect("/settings")
+        with connect_db() as c:
+            c.execute("INSERT OR IGNORE INTO srt_gw_slack(gw_id) VALUES(?)", (gid,))
+            c.execute("UPDATE srt_gw_slack SET notify_paused=0 WHERE gw_id=?", (gid,))
+        raise cherrypy.HTTPRedirect("/settings?msg=SRT+Gateway+notifications+resumed")
+
+
 def run():
+    _init_db()  # create tables/indexes once at startup
+    # Attach CORS headers to every response (including 3xx redirects)
+    def _cors():
+        cherrypy.response.headers['Access-Control-Allow-Origin'] = '*'
+    cherrypy.tools.cors = cherrypy.Tool('before_finalize', _cors, priority=60)
+
     port = int(os.getenv("StreamPilot", "5555"))
     mode = (os.getenv("SP_MODE") or "http").strip().lower()
     proxy_mode = (mode == "proxy")
@@ -3112,6 +5455,11 @@ def run():
     cfg = {
         "server.socket_port": port,
         "server.socket_host": "0.0.0.0",
+        "tools.response_headers.on": True,
+        "tools.response_headers.headers": [
+            ("Access-Control-Allow-Origin", "*"),
+        ],
+        "tools.cors.on": True,
         "server.thread_pool": 32,
         "server.socket_timeout": 5,
         "tools.sessions.on": True,
@@ -3132,15 +5480,22 @@ def run():
     cherrypy.config.update(cfg)
 
     # Start background poller so sessions start/stop even when Dashboard is not open
-    global POLLER
+    global POLLER, SRT_POLLER
     POLLER = BackgroundPoller(DB_PATH, interval=2)
     POLLER.start()
+    SRT_POLLER = SRTGatewayPoller(DB_PATH, interval=5)
+    SRT_POLLER.start()
 
     # Ensure clean shutdown
     def _on_stop():
         try:
             if POLLER:
                 POLLER.stop()
+        except Exception:
+            pass
+        try:
+            if SRT_POLLER:
+                SRT_POLLER.stop()
         except Exception:
             pass
     cherrypy.engine.subscribe('stop', _on_stop)

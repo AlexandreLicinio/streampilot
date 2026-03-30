@@ -74,7 +74,7 @@ Copyright (C) 2026 Alexandre Licinio
                         html[data-bs-theme='dark'] pre { background-color: #0f0f0f; color: #d0d0d0; }
                     </style>
                 </head>
-        <body>
+        <body data-retention-days="${srt_retention_days if hasattr(context, 'srt_retention_days') else 30}">
         <nav class="navbar navbar-expand-lg bg-body-tertiary">
             <div class="container-fluid">
                 <a class="navbar-brand" href="/">StreamPilot</a>
@@ -83,7 +83,8 @@ Copyright (C) 2026 Alexandre Licinio
                 </button>
                 <div id="mainNav" class="collapse navbar-collapse">
                     <ul class="navbar-nav me-auto">
-                        <li class="nav-item"><a class="nav-link" href="/">Dashboard</a></li>
+                        <li class="nav-item"><a class="nav-link" href="/">StreamHub</a></li>
+                        <li class="nav-item"><a class="nav-link" href="/gateway_dashboard">SRT Gateway</a></li>
                         <li class="nav-item"><a class="nav-link" href="/devices">Devices</a></li>
                         <li class="nav-item"><a class="nav-link" href="/health">Health</a></li>
                         <li class="nav-item"><a class="nav-link" href="/settings">Settings</a></li>
@@ -139,5 +140,6 @@ Copyright (C) 2026 Alexandre Licinio
         <footer class="text-center text-muted mt-5 mb-3 small">
             Alexandre Licinio © 2026 — StreamPilot — Stream smarter. Pilot with precision. Broadcast better.
         </footer>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     </body>
 </html>

@@ -1,0 +1,825 @@
+<!--
+SPDX-License-Identifier: LGPL-2.1-or-later
+Copyright (C) 2026 Alexandre Licinio
+-->
+<%inherit file="base.html"/>
+<%block name="body">
+<div class="d-flex align-items-center gap-2 mb-3">
+  <a href="/gateway_dashboard" class="btn btn-sm btn-outline-secondary">← SRT Gateway</a>
+  <span id="routeColorDot" style="display:inline-block;width:14px;height:14px;border-radius:50%;background:#ccc;flex-shrink:0"></span>
+<h5 class="mb-0" id="routeTitle">Loading…</h5>
+  <span class="badge text-bg-secondary" id="routeState">—</span>
+  <span class="text-muted small" id="routeElapsed"></span>
+  <span class="ms-auto text-muted small" id="lastUpdate"></span>
+</div>
+
+<!-- Summary cards -->
+<div class="row g-2 mb-3">
+  <div class="col-6 col-md-2"><div class="card p-2 text-center h-100">
+    <div class="text-muted" style="font-size:.7rem">Bitrate in</div>
+    <div class="fw-bold" id="cBrIn">—</div>
+  </div></div>
+  <div class="col-6 col-md-2"><div class="card p-2 text-center h-100">
+    <div class="text-muted" style="font-size:.7rem">Bitrate out</div>
+    <div class="fw-bold" id="cBrOut">—</div>
+  </div></div>
+  <div class="col-6 col-md-2"><div class="card p-2 text-center h-100">
+    <div class="text-muted" style="font-size:.7rem">RTT</div>
+    <div class="fw-bold" id="cRtt">—</div>
+  </div></div>
+  <div class="col-6 col-md-2"><div class="card p-2 text-center h-100">
+    <div class="text-muted" style="font-size:.7rem">Loss</div>
+    <div class="fw-bold" id="cLoss">—</div>
+  </div></div>
+  <div class="col-6 col-md-2"><div class="card p-2 text-center h-100">
+    <div class="text-muted" style="font-size:.7rem">Clients</div>
+    <div class="fw-bold" id="cClients">—</div>
+  </div></div>
+  <div class="col-6 col-md-2"><div class="card p-2 text-center h-100">
+    <div class="text-muted" style="font-size:.7rem">Signal losses</div>
+    <div class="fw-bold" id="cSignal">—</div>
+  </div></div>
+</div>
+
+<!-- Main chart -->
+<div class="card mb-3">
+  <div class="card-header fw-semibold">Live metrics</div>
+  <div class="card-body pb-2" style="position:relative;height:200px">
+    <canvas id="chartMain"></canvas>
+  </div>
+</div>
+
+<!-- Tabs -->
+<ul class="nav nav-tabs mb-0" id="mainTabs">
+  <li class="nav-item"><button class="nav-link active" data-tab="tabSource">Source</button></li>
+  <li class="nav-item"><button class="nav-link" data-tab="tabDests">Destinations</button></li>
+  <li class="nav-item"><button class="nav-link" data-tab="tabEvents">Events</button></li>
+  <li class="nav-item"><button class="nav-link" data-tab="tabMap">Map</button></li>
+  <li class="nav-item"><button class="nav-link" data-tab="tabReports">Reports</button></li>
+</ul>
+
+<!-- Source tab -->
+<div id="tabSource" class="tab-pane card rounded-top-0 border-top-0">
+  <div class="card-body">
+    <div class="row g-3">
+      <div class="col-md-4">
+        <h6 class="text-muted small text-uppercase">Configuration</h6>
+        <table class="table table-sm table-borderless" id="srcConfig"></table>
+      </div>
+      <div class="col-md-4">
+        <h6 class="text-muted small text-uppercase">Statistics</h6>
+        <table class="table table-sm table-borderless" id="srcStats"></table>
+      </div>
+      <div class="col-md-4">
+        <h6 class="text-muted small text-uppercase">SRT parameters</h6>
+        <table class="table table-sm table-borderless" id="srcSrt"></table>
+      </div>
+    </div>
+    <h6 class="text-muted small text-uppercase mt-3">Connections</h6>
+    <div class="table-responsive">
+      <table class="table table-sm table-hover">
+        <thead class="table-light"><tr>
+          <th>Address</th><th>Port</th><th>State</th><th>SRT ver</th>
+          <th>BW curr.</th><th>BW est.</th>
+          <th>RTT ms</th><th>Loss %</th><th>Buffer ms</th>
+          <th>Latency ms</th><th>Lost</th><th>Dropped</th><th>Retransmit</th><th>Enc.</th>
+        </tr></thead>
+        <tbody id="srcConnsTbody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Destinations tab -->
+<div id="tabDests" class="tab-pane card rounded-top-0 border-top-0 d-none">
+  <div class="card-body p-0" id="destsContainer"></div>
+</div>
+
+<!-- Events tab -->
+<div id="tabEvents" class="tab-pane card rounded-top-0 border-top-0 d-none">
+  <div class="card-header py-2 d-flex justify-content-between align-items-center"><span class="fw-semibold small">Last 10 events — times in local &amp; UTC</span><a class="small" id="eventsLogsLink" href="#">View all in Logs →</a></div>
+  <div class="card-body p-0">
+    <table class="table table-sm mb-0">
+      <thead class="table-light"><tr><th>Local time</th><th>Date (UTC)</th><th>Time (UTC)</th><th>Event</th><th>Detail</th><th>IP</th></tr></thead>
+      <tbody id="eventsBody"><tr><td colspan="5" class="text-muted text-center p-3">No events yet</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Map tab -->
+<div id="tabReports" class="tab-pane card rounded-top-0 border-top-0 d-none">
+  <div class="card-header d-flex justify-content-between align-items-center py-2">
+    <span class="fw-semibold small">Reports</span>
+    <button class="btn btn-sm btn-primary" type="button" data-bs-toggle="collapse"
+            data-bs-target="#newReportForm">+ New report</button>
+  </div>
+
+  <!-- New report form -->
+  <div class="collapse" id="newReportForm">
+    <div class="card-body border-bottom bg-light">
+      <form method="post" action="/gateway_report_create" class="row g-2 align-items-end"
+            id="newReportForm_form">
+        <input type="hidden" name="host" id="repHost">
+        <input type="hidden" name="route_id" id="repRouteId">
+        <input type="hidden" name="route_name" id="repRouteName">
+        <input type="hidden" name="tz_offset" id="repTzOffset">
+        <div class="col-md-3">
+          <label class="form-label small mb-1">Report name</label>
+          <input class="form-control form-control-sm" name="name" placeholder="e.g. Match 27/03" required>
+        </div>
+        <div class="col-md-3">
+          <label class="form-label small mb-1">From (local time → stored as UTC)</label>
+          <input class="form-control form-control-sm" type="datetime-local" name="started_at" required>
+        </div>
+        <div class="col-md-3">
+          <label class="form-label small mb-1">To (local time → stored as UTC)</label>
+          <input class="form-control form-control-sm" type="datetime-local" name="ended_at" required>
+        </div>
+        <div class="col-md-3">
+          <button class="btn btn-sm btn-success w-100" type="submit">Create report</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Reports list -->
+  <div class="card-body p-0">
+    <table class="table table-sm table-hover mb-0" id="reportsTable">
+      <thead class="table-light">
+        <tr><th>Name</th><th>From (UTC)</th><th>To (UTC)</th><th>Created (UTC)</th><th>Samples</th><th>Events</th><th>Actions</th></tr>
+      </thead>
+      <tbody id="reportsList"><tr><td colspan="7" class="text-muted text-center p-3">Loading…</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<div id="tabMap" class="tab-pane card rounded-top-0 border-top-0 d-none">
+<div id="routeMap" style="height:400px;"></div>
+</div>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+(function(){
+var HOST     = decodeURIComponent(new URLSearchParams(location.search).get('host')||'');
+var ROUTE_ID = decodeURIComponent(new URLSearchParams(location.search).get('route_id')||'');
+var MAX_PTS  = 120;
+
+// ── Tab switching ─────────────────────────────────────────────────────────
+document.querySelectorAll('#mainTabs button').forEach(function(btn){
+  btn.addEventListener('click',function(){
+    document.querySelectorAll('#mainTabs button').forEach(function(b){b.classList.remove('active');});
+    document.querySelectorAll('.tab-pane').forEach(function(p){p.classList.add('d-none');});
+    btn.classList.add('active');
+    document.getElementById(btn.dataset.tab).classList.remove('d-none');
+    if(btn.dataset.tab==='tabMap'){
+      if(!mapInited){ initMap(); }
+      else {
+        setTimeout(function(){
+          mapObj.invalidateSize();
+          if(lastData) doUpdateMap(lastData);
+        },50);
+      }
+    }
+    if(btn.dataset.tab==='tabReports') loadReports();
+  });
+});
+
+// ── Format helpers ────────────────────────────────────────────────────────
+function f(v,unit,dec){
+  if(v==null||v===''||isNaN(parseFloat(v))) return '—';
+  return parseFloat(v).toFixed(dec!=null?dec:2)+(unit||'');
+}
+function colorBadge(v,ok,warn){
+  if(v==null) return '<span class="badge text-bg-secondary">—</span>';
+  var n=parseFloat(v);
+  var cls = n<=ok?'text-bg-success':n<=warn?'text-bg-warning':'text-bg-danger';
+  return '<span class="badge '+cls+'">'+n.toFixed(2)+'</span>';
+}
+function stBadge(state){
+  var ok=(state||'').indexOf('connect')>=0||(state||'').indexOf('ok')>=0;
+  return '<span class="badge '+(ok?'text-bg-success':'text-bg-secondary')+'">'+(state||'—')+'</span>';
+}
+function tr(label,val){
+  return '<tr><td class="text-muted small pe-3 text-nowrap" style="width:50%">'+label+'</td>'
+        +'<td class="small fw-semibold">'+val+'</td></tr>';
+}
+
+// ── Main chart ────────────────────────────────────────────────────────────
+var mTs=[], mBrIn=[], mBrOut=[], mRtt=[], mLoss=[];
+function push(arr,v){arr.push(v!=null?parseFloat(v):null);if(arr.length>MAX_PTS)arr.shift();}
+
+var mainChart = new Chart(document.getElementById('chartMain'),{
+  type:'line', data:{labels:mTs, datasets:[
+    {label:'Bitrate in Mb/s', data:mBrIn, borderColor:'#0d6efd',yAxisID:'yBr',tension:0.3,pointRadius:0,fill:false},
+    {label:'Bitrate out Mb/s',data:mBrOut,borderColor:'#198754',yAxisID:'yBr',tension:0.3,pointRadius:0,fill:false},
+    {label:'RTT ms',          data:mRtt,  borderColor:'#fd7e14',yAxisID:'yR', tension:0.3,pointRadius:0,fill:false},
+    {label:'Loss %',          data:mLoss, borderColor:'#dc3545',yAxisID:'yL', tension:0.3,pointRadius:0,fill:false},
+  ]},
+  options:{animation:false,responsive:true,maintainAspectRatio:false,
+    plugins:{legend:{position:'top'}},
+    scales:{
+      yBr:{position:'left', title:{display:true,text:'Mb/s'}},
+      yR: {position:'right',grid:{drawOnChartArea:false},title:{display:true,text:'RTT ms'}},
+      yL: {position:'right',grid:{drawOnChartArea:false},title:{display:true,text:'Loss %'},
+           ticks:{color:'#dc3545'}}
+    }
+  }
+});
+
+// ── Per-client charts — keyed by "di_ci" ─────────────────────────────────
+// Key structure: di=destination index, ci=client index
+var cSeries  = {};  // key -> {ts,rtt,loss,bw}
+var cCharts  = {};  // key -> {rl: Chart, bw: Chart}
+
+function ensureClientChart(key){
+  if(cCharts[key]) return;
+  var cRL='cchart_rl_'+key, cBW='cchart_bw_'+key;
+  if(!document.getElementById(cRL)) return;
+  cSeries[key]={ts:[],rtt:[],loss:[],bw:[]};
+  // Chart 1: RTT + Loss
+  var ch1=new Chart(document.getElementById(cRL),{
+    type:'line', data:{labels:cSeries[key].ts, datasets:[
+      {label:'RTT ms', data:cSeries[key].rtt, borderColor:'#fd7e14',yAxisID:'yR',tension:0.3,pointRadius:0,fill:false},
+      {label:'Loss %', data:cSeries[key].loss,borderColor:'#dc3545',yAxisID:'yL',tension:0.3,pointRadius:0,fill:false},
+    ]},
+    options:{animation:false,responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{position:'top'}},
+      scales:{
+        yR:{position:'left', title:{display:true,text:'RTT ms'}},
+        yL:{position:'right',grid:{drawOnChartArea:false},title:{display:true,text:'Loss %'},ticks:{color:'#dc3545'}}
+      }
+    }
+  });
+  // Chart 2: Bitrate only
+  var ch2=new Chart(document.getElementById(cBW),{
+    type:'line', data:{labels:cSeries[key].ts, datasets:[
+      {label:'Bitrate Mb/s',data:cSeries[key].bw,borderColor:'#0d6efd',tension:0.3,pointRadius:0,fill:false},
+    ]},
+    options:{animation:false,responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{position:'top'}},
+      scales:{y:{title:{display:true,text:'Mb/s'}}}
+    }
+  });
+  cCharts[key]={rl:ch1,bw:ch2};
+}
+
+function updateClientChart(key, rttV, lossV, bwV){
+  var s=cSeries[key]; if(!s) return;
+  var t=new Date().toLocaleTimeString();
+  s.ts.push(t);if(s.ts.length>MAX_PTS)s.ts.shift();
+  push(s.rtt,rttV); push(s.loss,lossV); push(s.bw,bwV);
+  if(cCharts[key]){
+    cCharts[key].rl.data.labels=s.ts; cCharts[key].rl.update();
+    cCharts[key].bw.data.labels=s.ts; cCharts[key].bw.update();
+  }
+}
+
+// ── Destination rendering — ONCE then update in-place ────────────────────
+var destsInited = false;
+var destsData   = [];  // last known destinations array for structure comparison
+
+// Extract clients from a destination regardless of mode
+// Listener -> clientsStat[] (SRT fields in connections[0])
+// Caller   -> connections[] (SRT fields directly on item, no sub-connections)
+function extractClients(dst){
+  var mode=(dst.mode||'').toLowerCase();
+  if(dst.clientsStat && dst.clientsStat.length){
+    return dst.clientsStat.map(function(cl){
+      var conn=(cl.connections&&cl.connections[0])||{};
+      return {
+        label:     cl.label||'',
+        address:   cl.address||conn.address||'?',
+        port:      cl.port||conn.port||0,
+        srtVersion:cl.srtVersion||'',
+        peerVersion:cl.SRTPeerVersion||'',
+        bitrate:   cl.bitrate,
+        usedBw:    cl.usedBandwidth,
+        rtt:       conn.srtRoundTripTime,
+        loss:      conn.srtPacketLossRate,
+        buffer:    conn.srtBufferLevel,
+        latency:   conn.srtNegotiatedLatency,
+        enc:       conn.srtEncryption||'none',
+        lostPkts:  conn.srtNumLostPackets,
+        dropped:   conn.srtDroppedPackets,
+        retransmit:conn.srtRetransmitRate,
+        bwCurr:    conn.srtCurrentBandwidth,
+        bwEst:     conn.srtEstimatedBandwidth,
+        state:     conn.state||'connected',
+        _raw:      conn
+      };
+    });
+  }
+  if(mode!=='listener' && dst.connections && dst.connections.length){
+    // Caller: connections[] items have all fields directly
+    return dst.connections.map(function(c){
+      return {
+        label:     c.label||'',
+        address:   c.address||'?',
+        port:      c.port||0,
+        srtVersion:c.srtVersion||'',
+        peerVersion:c.SRTPeerVersion||'',
+        bitrate:   c.bitrate,
+        usedBw:    c.usedBandwidth,
+        rtt:       c.srtRoundTripTime,
+        loss:      c.srtPacketLossRate,
+        buffer:    c.srtBufferLevel,
+        latency:   c.srtNegotiatedLatency,
+        enc:       c.srtEncryption||'none',
+        lostPkts:  c.srtNumLostPackets,
+        dropped:   c.srtDroppedPackets,
+        retransmit:c.srtRetransmitRate,
+        bwCurr:    c.srtCurrentBandwidth,
+        bwEst:     c.srtEstimatedBandwidth,
+        state:     c.state||'connected',
+        _raw:      c
+      };
+    });
+  }
+  return [];
+}
+
+function buildDestsHTML(dsts){
+  return dsts.map(function(dst,di){
+    var clients = extractClients(dst);
+    var stateStr = dst.state||dst.summaryStatusDetails||'';
+    var stCls = stateStr.indexOf('connect')>=0?'text-bg-success':'text-bg-secondary';
+    var modeBadge = '<span class="badge text-bg-info me-1">'+(dst.mode||'').toUpperCase()+'</span>';
+    var cfgRows=[
+      ['Protocol',(dst.protocol||'srt').toUpperCase()+' · '+(dst.mode||'')],
+      ['Address',  dst.address+':'+dst.port],
+      ['State',    stBadge(stateStr)],
+      ['Elapsed',  dst.elapsedRunningTime||'—'],
+      ['Latency',  f(dst.srtNegotiatedLatency,' ms',0)||f(dst.srtLatency,' ms',0)],
+      ['Enc.',     dst.srtEncryption||'none'],
+      ['Limit',    dst.srtConnectionLimit!=null?dst.srtConnectionLimit:'—'],
+      ['Rejected', dst.srtRejectedCount!=null?dst.srtRejectedCount:'—'],
+    ];
+    var stRows=[
+      ['Bitrate',    f(dst.bitrate,' Mb/s')],
+      ['Used BW',    f(dst.usedBandwidth,' Mb/s')],
+      ['Send rate',  f(dst.sendRate,' Mb/s')],
+      ['Packets',    f(dst.numPackets,'',0)],
+      ['Dropped',    f(dst.srtDroppedPackets,'',0)],
+    ];
+    var clientsHtml = clients.map(function(cl,ci){
+      var key=di+'_'+ci;
+      return '<div class="border rounded p-2 mb-2" id="cl_'+key+'">'
+        +'<div class="d-flex flex-wrap gap-2 align-items-center mb-2">'
+        +'<span class="fw-semibold small">'+(cl.label||'Client '+ci)+'</span>'
+        +'<code class="small">'+cl.address+':'+cl.port+'</code>'
+        +(cl.srtVersion?'<span class="text-muted small">SRT '+cl.srtVersion+' / peer '+cl.peerVersion+'</span>':'')
+        +'<span class="ms-auto small text-muted" id="cl_br_'+key+'">'+f(cl.bitrate,' Mb/s')+'</span>'
+        +'</div>'
+        +'<div class="table-responsive mb-2">'
+        +'<table class="table table-sm mb-0"><thead class="table-light"><tr>'
+        +'<th>BW curr.</th><th>BW est.</th><th>RTT ms</th><th>Loss %</th>'
+        +'<th>Buffer ms</th><th>Latency ms</th><th>Lost</th><th>Dropped</th><th>Retransmit</th><th>Enc.</th>'
+        +'</tr></thead>'
+        +'<tbody id="cl_tb_'+key+'"></tbody>'
+        +'</table></div>'
+        +'<div class="row g-2 mt-1">'
+        +'<div class="col-md-6" style="position:relative;height:100px"><canvas id="cchart_rl_'+key+'"></canvas></div>'
+        +'<div class="col-md-6" style="position:relative;height:100px"><canvas id="cchart_bw_'+key+'"></canvas></div>'
+        +'</div>'
+        +'</div>';
+    }).join('');
+    return '<div class="accordion-item">'
+      +'<h2 class="accordion-header">'
+      +'<button class="accordion-button'+(di>0?' collapsed':'')
+      +'" data-bs-toggle="collapse" data-bs-target="#dp'+di+'">'
+      +'<span class="fw-semibold me-2">'+(dst.name||'Dest '+di)+'</span>'
+      +modeBadge
+      +'<span class="badge '+stCls+' me-1">'+(stateStr||'—')+'</span>'
+      +'<span class="badge text-bg-secondary" id="dst_clients_'+di+'">'+clients.length+' client(s)</span>'
+      +'</button></h2>'
+      +'<div id="dp'+di+'" class="accordion-collapse collapse'+(di===0?' show':'')+'">'
+      +'<div class="accordion-body">'
+      +'<div class="row g-3 mb-3">'
+      +'<div class="col-md-5"><h6 class="text-muted small text-uppercase">Config</h6>'
+      +'<table class="table table-sm table-borderless">'+cfgRows.map(function(r){return tr(r[0],r[1]);}).join('')+'</table></div>'
+      +'<div class="col-md-7"><h6 class="text-muted small text-uppercase">Statistics</h6>'
+      +'<table class="table table-sm table-borderless">'+stRows.map(function(r){return tr(r[0],r[1]);}).join('')+'</table></div>'
+      +'</div>'
+      +'<h6 class="text-muted small text-uppercase">Clients</h6>'
+      +(clientsHtml||'<p class="text-muted small">No clients connected</p>')
+      +'</div></div></div>';
+  }).join('');
+}
+
+function updateClientRows(dsts){
+  dsts.forEach(function(dst,di){
+    var clients = extractClients(dst);
+    var el = document.getElementById('dst_clients_'+di);
+    if(el) el.textContent = clients.length+' client(s)';
+    clients.forEach(function(cl,ci){
+      var key=di+'_'+ci;
+      // Update bitrate label
+      var brEl=document.getElementById('cl_br_'+key);
+      if(brEl) brEl.textContent=f(cl.bitrate,' Mb/s');
+      // Update connection table row
+      var tb=document.getElementById('cl_tb_'+key);
+      if(tb) tb.innerHTML='<tr>'
+        +'<td>'+f(cl.bwCurr,' Mb/s')+'</td>'
+        +'<td>'+f(cl.bwEst,' Mb/s')+'</td>'
+        +'<td>'+colorBadge(cl.rtt,50,200)+'</td>'
+        +'<td>'+colorBadge(cl.loss,1,5)+'</td>'
+        +'<td>'+f(cl.buffer,' ms',0)+'</td>'
+        +'<td>'+f(cl.latency,' ms',0)+'</td>'
+        +'<td>'+f(cl.lostPkts,'',0)+'</td>'
+        +'<td>'+f(cl.dropped,'',0)+'</td>'
+        +'<td>'+f(cl.retransmit,' b/s',0)+'</td>'
+        +'<td><span class="badge text-bg-secondary small">'+(cl.enc||'none')+'</span></td>'
+        +'</tr>';
+      // Chart
+      ensureClientChart(key);
+      updateClientChart(key, cl.rtt, cl.loss, cl.bitrate);
+    });
+  });
+}
+
+// ── Map ───────────────────────────────────────────────────────────────────
+var mapInited=false, mapObj, mapMarkers={}, mapLines={};
+// Same palette as dashboard — color derived from route_id hash for consistency
+var ROUTE_COLORS=['#ff007f','#00bfff','#ff6600','#00cc44','#cc00ff',
+                  '#ffcc00','#00cccc','#ff4444','#aabb00','#ff99cc'];
+function routeIdColor(rid){
+  var h=0; for(var i=0;i<rid.length;i++) h=(h*31+rid.charCodeAt(i))&0xfffffff;
+  return ROUTE_COLORS[h%ROUTE_COLORS.length];
+}
+var RCOLOR=routeIdColor(ROUTE_ID);
+function initMap(){
+  mapObj=L.map('routeMap').setView([20,0],2);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OSM',maxZoom:18}).addTo(mapObj);
+  mapInited=true;
+  if(lastData) doUpdateMap(lastData);
+  var dbg=L.control({position:'bottomleft'});
+  dbg.onAdd=function(){var d=L.DomUtil.create('div','leaflet-control');d.id='mapDbg';
+    d.style.cssText='background:rgba(0,0,0,.65);color:#fff;font-size:10px;padding:5px 8px;'
+      +'max-width:280px;border-radius:4px;line-height:1.6;';
+    d.innerHTML='Waiting for data…';return d;};
+  dbg.addTo(mapObj);
+}
+// All IP coords loaded once from DB — no per-IP async calls
+var geoDb={}; // {ip: {lat,lng,label}} — populated by loadGeoDb()
+function geo(ip,cb){
+  if(!ip||ip==='0.0.0.0'||ip.indexOf('localhost')>=0) return;
+  var g=geoDb[ip]; if(g) cb(g); // sync, instant
+}
+function loadGeoDb(onDone){
+  fetch('/geoip_all')
+    .then(function(r){return r.json();})
+    .then(function(d){ geoDb=d; if(onDone) onDone(); })
+    .catch(function(){ if(onDone) onDone(); });
+}
+function mark(key,lat,lng,color,title,popup,radius){
+  if(!mapObj) return;
+  if(mapMarkers[key]){mapMarkers[key].setLatLng([lat,lng]).setStyle({color:color,fillColor:color});return;}
+  mapMarkers[key]=L.circleMarker([lat,lng],{radius:radius||8,color:color,fillColor:color,fillOpacity:0.85})
+    .addTo(mapObj).bindPopup('<b>'+title+'</b><br>'+popup);
+}
+function line(key,lat1,lng1,lat2,lng2,color){
+  if(!mapObj) return;
+  if(mapLines[key]){mapLines[key].setLatLngs([[lat1,lng1],[lat2,lng2]]).setStyle({color:color});return;}
+  mapLines[key]=L.polyline([[lat1,lng1],[lat2,lng2]],{color:color,weight:2,opacity:0.7}).addTo(mapObj);
+}
+function haversine(lat1,lng1,lat2,lng2){
+  var R=6371,d2r=Math.PI/180;
+  var dLat=(lat2-lat1)*d2r,dLng=(lng2-lng1)*d2r;
+  var a=Math.sin(dLat/2)*Math.sin(dLat/2)+Math.cos(lat1*d2r)*Math.cos(lat2*d2r)*Math.sin(dLng/2)*Math.sin(dLng/2);
+  return Math.round(R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a)));
+}
+function doUpdateMap(data){
+  var rstat=(data.stats||{}).route||{};
+  var src=rstat.source||{};
+  var dsts=rstat.destinations||[];
+  var brTotal=rstat.total_bitrate_mbps;
+
+  // Source IP
+  var srcIp=null;
+  if(src.mode==='caller'&&src.address&&src.address!=='0.0.0.0') srcIp=src.address;
+  (src.connections||[]).forEach(function(c){
+    if(!srcIp&&c.address&&c.address!=='0.0.0.0') srcIp=c.address;
+  });
+
+  // All clients
+  var allClients=[];
+  dsts.forEach(function(dst,di){
+    if(dst.clientsStat&&dst.clientsStat.length){
+      dst.clientsStat.forEach(function(cl,ci){
+        var conn=(cl.connections&&cl.connections[0])||{};
+        allClients.push({key:'cli_'+di+'_'+ci,ip:cl.address||conn.address,
+          label:cl.label||cl.address,rtt:conn.srtRoundTripTime,
+          loss:conn.srtPacketLossRate,port:cl.port||conn.port,br:cl.bitrate});
+      });
+    } else if((dst.mode||'').toLowerCase()!=='listener'&&(dst.connections||[]).length){
+      dst.connections.forEach(function(c,ci){
+        allClients.push({key:'cli_'+di+'_'+ci,ip:c.address,
+          label:c.label||c.address,rtt:c.srtRoundTripTime,
+          loss:c.srtPacketLossRate,port:c.port,br:c.bitrate});
+      });
+    }
+  });
+
+  // Debug bar
+  var dbgEl=document.getElementById('mapDbg');
+  if(dbgEl) dbgEl.innerHTML=
+    '📍 Src: '+(srcIp||'<span style="color:#aaa">—</span>')+'<br>'+
+    '👥 Clients: '+(allClients.map(function(c){return c.ip;}).filter(Boolean).join('<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;')||'<span style="color:#aaa">none</span>')+'<br>'+
+    '<a href="/gateway_geoip" style="color:#7cf;font-size:9px">✏ edit coordinates</a>';
+
+  // Source marker
+  if(srcIp) geo(srcIp,function(g){
+    if(!g) return;
+    mark('src',g.lat,g.lng,RCOLOR,src.name||srcIp,
+      srcIp+'<br>'+(src.name||'')+'<br>'+(g.label||''),10);
+  });
+
+  // Client markers + fuchsia lines
+  allClients.forEach(function(cl){
+    if(!cl.ip||cl.ip==='0.0.0.0') return;
+    (function(key,ip,label,rtt,loss,port,br){
+      geo(ip,function(gc){
+        if(!gc) return;
+        mark(key,gc.lat,gc.lng,RCOLOR,label||ip,
+          ip+(port?':'+port:'')+'<br>'+(gc.label||''));
+        if(!srcIp) return;
+        geo(srcIp,function(gs){
+          if(!gs) return;
+          var dist=haversine(gs.lat,gs.lng,gc.lat,gc.lng);
+          var brVal=br!=null?br:(brTotal!=null?brTotal:null);
+          var popup='<b>'+(label||ip)+'</b><br>'
+            +(brVal!=null?'Bitrate: '+brVal.toFixed(2)+' Mb/s<br>':'')
+            +(rtt!=null?'RTT: '+rtt.toFixed(1)+' ms<br>':'')
+            +(loss!=null?'Loss: '+loss.toFixed(2)+'%<br>':'')
+            +dist+' km';
+          if(mapLines['l'+key]){
+            mapLines['l'+key].setLatLngs([[gs.lat,gs.lng],[gc.lat,gc.lng]]).setPopupContent(popup);
+          } else {
+            mapLines['l'+key]=L.polyline([[gs.lat,gs.lng],[gc.lat,gc.lng]],
+              {color:RCOLOR,weight:4,opacity:0.9})
+              .addTo(mapObj).bindPopup(popup);
+          }
+        });
+      });
+    })(cl.key,cl.ip,cl.label,cl.rtt,cl.loss,cl.port,cl.br);
+  });
+  // fitBounds
+  var bounds=[];
+  Object.keys(mapMarkers).forEach(function(k){
+    var ll=mapMarkers[k].getLatLng(); bounds.push([ll.lat,ll.lng]);
+  });
+  if(bounds.length>1&&mapObj) try{mapObj.fitBounds(bounds,{padding:[30,30],maxZoom:10});}catch(e){}
+}
+
+// ── Source tab update ─────────────────────────────────────────────────────
+function updateSource(rstat, rcfg){
+  var src=rstat.source||{};
+  var scfg=rcfg.source||{};
+  document.getElementById('srcConfig').innerHTML=[
+    ['Name',    scfg.name||src.name||'—'],
+    ['Protocol',(scfg.protocol||src.protocol||'srt').toUpperCase()],
+    ['Mode',    scfg.mode||src.mode||'—'],
+    ['Address', (scfg.address||'—')+':'+(scfg.port||'—')],
+    ['SRT version', src.srt_version||'—'],
+    ['State',   stBadge(src.state)],
+    ['Elapsed', src.elapsedRunningTime||'—'],
+  ].map(function(r){return tr(r[0],r[1]);}).join('');
+
+  document.getElementById('srcStats').innerHTML=[
+    ['Bitrate',   f(src.bitrate,' Mb/s')],
+    ['Used BW',   f(src.usedBandwidth,' Mb/s')],
+    ['Send rate', f(src.sendRate,' Mb/s')],
+    ['Packets',   f(src.numPackets,'',0)],
+    ['Signal losses',f(src.signalLosses,'',0)],
+  ].map(function(r){return tr(r[0],r[1]);}).join('');
+
+  document.getElementById('srcSrt').innerHTML=[
+    ['RTT',        colorBadge(src.srtRoundTripTime,50,200)+' ms'],
+    ['Loss',       colorBadge(src.srtPacketLossRate,1,5)+' %'],
+    ['Buffer',     f(src.srtBufferLevel,' ms',0)],
+    ['Latency neg.',f(src.srtNegotiatedLatency,' ms',0)],
+    ['Latency cfg.',f(src.srtLatency,' ms',0)],
+    ['Encryption', src.srtEncryption||src.srtCryptoMode||'—'],
+    ['Lost pkts',  f(src.srtNumLostPackages||src.srtNumLostPackets,'',0)],
+    ['Retransmit', f(src.srtRetransmitRate,' b/s',0)],
+    ['Unrecovered',f(src.srtUnrecoveredPackets,'',0)],
+  ].map(function(r){return tr(r[0],r[1]);}).join('');
+
+  var srcConns=src.connections||[];
+  document.getElementById('srcConnsTbody').innerHTML=srcConns.length
+    ? srcConns.map(function(c){
+        return '<tr>'
+          +'<td class="font-monospace small">'+c.address+'</td><td>'+c.port+'</td>'
+          +'<td>'+stBadge(c.state)+'</td>'
+          +'<td><span class="badge text-bg-light text-dark small">'+(c.srtVersion||'—')+'</span></td>'
+          +'<td>'+f(c.srtCurrentBandwidth,' Mb/s')+'</td>'
+          +'<td>'+f(c.srtEstimatedBandwidth,' Mb/s')+'</td>'
+          +'<td>'+colorBadge(c.srtRoundTripTime,50,200)+'</td>'
+          +'<td>'+colorBadge(c.srtPacketLossRate,1,5)+'</td>'
+          +'<td>'+f(c.srtBufferLevel,' ms',0)+'</td>'
+          +'<td>'+f(c.srtNegotiatedLatency,' ms',0)+'</td>'
+          +'<td>'+f(c.srtNumLostPackets,'',0)+'</td>'
+          +'<td>'+f(c.srtDroppedPackets,'',0)+'</td>'
+          +'<td>'+f(c.srtRetransmitRate,' b/s',0)+'</td>'
+          +'<td><span class="badge text-bg-secondary small">'+(c.srtEncryption||'none')+'</span></td>'
+          +'</tr>';
+      }).join('')
+    : '<tr><td colspan="14" class="text-muted text-center">No active connections</td></tr>';
+}
+
+// ── Main updateUI ─────────────────────────────────────────────────────────
+var lastData=null;
+
+function updateUI(data){
+  if(!data.ok) return;
+  lastData=data;
+  if(mapInited) doUpdateMap(data);
+  var rstat=(data.stats||{}).route||{};
+  var rcfg=data.config||{};
+  var src=rstat.source||{};
+  var dsts=rstat.destinations||[];
+  // Merge config fields (address, port, srtConnectionLimit…) into stats destinations
+  var cfgDsts=(rcfg.destinations||[]);
+  dsts=dsts.map(function(dst){
+    var cfgMatch=cfgDsts.find(function(c){return c.id===dst.id||c.name===dst.name;});
+    return cfgMatch ? Object.assign({}, cfgMatch, dst) : dst;
+  });
+  // Add any config destinations not yet in stats (e.g. idle)
+  cfgDsts.forEach(function(c){
+    if(!dsts.find(function(d){return d.id===c.id||d.name===c.name;})) dsts.push(c);
+  });
+
+  // Header
+  document.getElementById('routeTitle').textContent=rcfg.name||rstat.name||ROUTE_ID;
+  var _rrn=document.getElementById('repRouteName');
+  if(_rrn) _rrn.value=rcfg.name||rstat.name||ROUTE_ID;
+  // Color dot
+  var dotEl=document.getElementById('routeColorDot');
+  if(dotEl) dotEl.style.background=RCOLOR;
+  var state=rcfg.state||rstat.state||'idle';
+  var sb=document.getElementById('routeState');
+  sb.textContent=state; sb.className='badge '+(state==='running'?'text-bg-success':'text-bg-secondary');
+  document.getElementById('routeElapsed').textContent=rstat.elapsedRunningTime?'('+rstat.elapsedRunningTime+')':'';
+  document.getElementById('lastUpdate').textContent='Updated '+new Date().toLocaleTimeString();
+
+  // Cards
+  var brIn=src.bitrate;
+  var brOut=dsts.reduce(function(s,d){
+    // Listener: each client gets the full stream → sum clientsStat[].bitrate
+    var cs=d.clientsStat||[];
+    if(cs.length) return s+cs.reduce(function(a,c){return a+(c.bitrate||0);},0);
+    // Caller/Rendezvous: sum connected connections[].bitrate
+    var co=d.connections||[];
+    if(co.length) return s+co.reduce(function(a,c){return a+(c.bitrate||0);},0);
+    return s+(d.bitrate||0);
+  },0)||null;
+  var totalClients=dsts.reduce(function(s,d){return s+extractClients(d).length;},0);
+  document.getElementById('cBrIn').textContent=f(brIn,' Mb/s');
+  document.getElementById('cBrOut').textContent=f(brOut,' Mb/s');
+  document.getElementById('cRtt').textContent=f(src.srtRoundTripTime,' ms',1);
+  document.getElementById('cLoss').textContent=f(src.srtPacketLossRate,'%');
+  document.getElementById('cClients').textContent=totalClients;
+  document.getElementById('cSignal').textContent=f(src.signalLosses,'',0);
+
+  // Main chart
+  var ts=new Date().toLocaleTimeString();
+  mTs.push(ts); if(mTs.length>MAX_PTS)mTs.shift();
+  push(mBrIn,brIn); push(mBrOut,brOut);
+  push(mRtt,src.srtRoundTripTime); push(mLoss,src.srtPacketLossRate);
+  mainChart.update();
+
+  // Source tab (always update)
+  updateSource(rstat, rcfg);
+
+  // Destinations tab — build HTML once, then update data in-place
+  var container=document.getElementById('destsContainer');
+  if(!destsInited){
+    container.innerHTML='<div class="accordion accordion-flush">'
+      +(dsts.length?buildDestsHTML(dsts):'<p class="text-muted p-3">No destinations</p>')
+      +'</div>';
+    destsInited=true;
+    // init charts after DOM is ready
+    setTimeout(function(){
+      dsts.forEach(function(dst,di){
+        extractClients(dst).forEach(function(cl,ci){ensureClientChart(di+'_'+ci);});
+      });
+    },100);
+  }
+  updateClientRows(dsts);
+
+  if(mapInited) doUpdateMap(data);
+}
+
+// ── Events ────────────────────────────────────────────────────────────────
+function pollEvents(){
+  fetch('/gateway_events?host='+encodeURIComponent(HOST)+'&route_id='+encodeURIComponent(ROUTE_ID)+'&limit=10')
+    .then(function(r){return r.json();})
+    .then(function(data){
+      var tbody=document.getElementById('eventsBody');
+      if(!data.ok||!tbody) return;
+      var evs=data.events||[];
+      if(!evs.length){tbody.innerHTML='<tr><td colspan="6" class="text-muted text-center p-3">No events yet</td></tr>';return;}
+      tbody.innerHTML=evs.map(function(e){
+        var t=e.type||'';
+        var badge=t.indexOf('started')>=0||t.indexOf('connected')>=0
+          ?'<span class="badge text-bg-success">'+t+'</span>'
+          :t.indexOf('stopped')>=0||t.indexOf('disconnected')>=0
+          ?'<span class="badge text-bg-danger">'+t+'</span>'
+          :'<span class="badge text-bg-secondary">'+t+'</span>';
+        var rts=e.ts||'',dp='';
+        if(rts.length>=10){var dp0=rts.slice(0,10).split('-');dp=dp0[2]+'/'+dp0[1]+'/'+dp0[0];}
+        // Local time from UTC
+        var localStr='';
+        if(rts.length>=16){
+          try{
+            var localDt=new Date(rts.replace(' ','T')+'Z');
+            localStr=localDt.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+          }catch(e2){}
+        }
+        return '<tr>'
+          +'<td class="text-muted small">'+localStr+'</td>'
+          +'<td class="text-muted small">'+dp+'</td>'
+          +'<td class="text-muted small">'+rts.slice(11,19)+'</td>'
+          +'<td>'+badge+'</td>'
+          +'<td class="small text-muted">'+(e.detail||'')+'</td>'
+          +'<td>'+(e.ip?'<code class="small">'+e.ip+'</code>':'<span class="text-muted">—</span>')+'</td></tr>';
+      }).join('');
+    }).catch(function(){});
+}
+
+// ── Poll ──────────────────────────────────────────────────────────────────
+function poll(){
+  fetch('/gateway_route_stats?host='+encodeURIComponent(HOST)+'&route_id='+encodeURIComponent(ROUTE_ID))
+    .then(function(r){return r.json();})
+    .then(updateUI).catch(function(){});
+}
+
+// Load all saved coordinates once, then start polling
+loadGeoDb(function(){
+  poll();
+  pollEvents();
+  setInterval(poll,5000);
+  setInterval(pollEvents,5000);
+});
+var _lnk=document.getElementById('eventsLogsLink');
+if(_lnk)_lnk.href='/gateway_logs_route?host='+encodeURIComponent(HOST)+'&route_id='+encodeURIComponent(ROUTE_ID);
+// Wire hidden fields in report form
+var _rh=document.getElementById('repHost'); if(_rh) _rh.value=HOST;
+// Set timezone offset (minutes, negative for UTC+)
+var _tzo=document.getElementById('repTzOffset');
+if(_tzo) _tzo.value=new Date().getTimezoneOffset();
+var _rri=document.getElementById('repRouteId'); if(_rri) _rri.value=ROUTE_ID;
+// Set route_name once page title is known (filled by updateUI)
+// Load reports list when Reports tab is opened
+function loadReports(){
+  fetch('/gateway_reports_json?host='+encodeURIComponent(HOST)+'&route_id='+encodeURIComponent(ROUTE_ID))
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var tbody=document.getElementById('reportsList'); if(!tbody) return;
+      if(!d.ok||!d.reports.length){
+        tbody.innerHTML='<tr><td colspan="7" class="text-muted text-center p-3">No reports yet.</td></tr>'; return;
+      }
+      tbody.innerHTML=d.reports.map(function(r){
+        return '<tr>'
+          +'<td class="fw-semibold">'+r.name+'</td>'
+          +'<td class="small text-muted">'+r.started_at+'</td>'
+          +'<td class="small text-muted">'+r.ended_at+'</td>'
+          +'<td class="small text-muted">'+r.created_at+'</td>'
+          +'<td><span class="badge text-bg-secondary">'+r.sample_count+'</span></td>'
+          +'<td><span class="badge text-bg-secondary">'+r.event_count+'</span></td>'
+          +'<td>'
+          +'<a class="btn btn-sm btn-outline-dark me-1" href="/gateway_report_pdf?report_id='+r.id+'&tz_offset='+new Date().getTimezoneOffset()+'" target="_blank">PDF</a>'
+          +'<form method="post" action="/gateway_report_delete" class="d-inline"'
+          +' onsubmit="return confirm(\'Delete this report?\')">'
+          +'<input type="hidden" name="report_id" value="'+r.id+'">'
+          +'<input type="hidden" name="host" value="'+HOST+'">'
+          +'<input type="hidden" name="route_id" value="'+ROUTE_ID+'">'
+          +'<button class="btn btn-sm btn-outline-danger" type="submit">Delete</button>'
+          +'</form></td>'
+          +'</tr>';
+      }).join('');
+    }).catch(function(){});
+}
+// Open tab from URL param
+var _tabParam = new URLSearchParams(location.search).get('tab');
+if(_tabParam){
+  document.querySelectorAll('[data-tab]').forEach(function(b){
+    if(b.dataset.tab===_tabParam){
+      b.classList.add('active');
+      var el=document.getElementById(_tabParam); if(el) el.classList.remove('d-none');
+    } else {
+      b.classList.remove('active');
+      var el2=document.getElementById(b.dataset.tab); if(el2) el2.classList.add('d-none');
+    }
+  });
+  if(_tabParam==='tabReports') loadReports();
+  if(_tabParam==='tabMap'){
+    if(!mapInited){ initMap(); }
+    else { setTimeout(function(){ mapObj.invalidateSize(); if(lastData) doUpdateMap(lastData); },50); }
+  }
+}
+})();
+</script>
+</%block>
