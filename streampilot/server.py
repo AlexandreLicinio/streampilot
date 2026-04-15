@@ -5441,7 +5441,7 @@ def run():
         cherrypy.response.headers['Access-Control-Allow-Origin'] = '*'
     cherrypy.tools.cors = cherrypy.Tool('before_finalize', _cors, priority=60)
 
-    port = int(os.getenv("StreamPilot", "5555"))
+    port = int(os.getenv("SP_PORT", "5555"))
     mode = (os.getenv("SP_MODE") or "http").strip().lower()
     proxy_mode = (mode == "proxy")
     # Warn if default credentials are used
