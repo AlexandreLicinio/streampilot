@@ -76,7 +76,7 @@ Set the listening port (example: 5555) and start the server from the project roo
 ### Dev / LAN (self-hosted):
 
 ```bash
-bin/python -m streampilot -port 5555 -name "John Dear" -max_streamhubs 4  -max_srtgateway 2 -user 'admin' -password 'password'
+bin/python streampilot/server.py -port 5555 -name "John Dear" -max_streamhubs 4  -max_srtgateway 2 -user 'admin' -password 'password'
 ```
 
 ### Behind Nginx in HTTPS (proxy):
