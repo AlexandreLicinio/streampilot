@@ -2802,7 +2802,7 @@ class App:
 
     @require_login
     @cherrypy.expose
-    def log_download(self, session_id=None):
+    def log_download(self, session_id=None, tz_offset=None):
         cherrypy.response.headers["Content-Type"] = "application/json; charset=utf-8"
         if not session_id:
             return b'{"ok": false, "error":"missing session_id"}'
@@ -2810,7 +2810,20 @@ class App:
             sid = int(session_id)
         except Exception:
             return b'{"ok": false, "error":"bad session_id"}'
+        try:
+            tz_min = int(tz_offset) if tz_offset is not None else None
+        except Exception:
+            tz_min = None
         import sqlite3, json
+        from datetime import datetime as _dtl, timedelta as _tdl
+        def _to_local(iso_str):
+            if not iso_str or tz_min is None:
+                return None
+            try:
+                dt = _dtl.fromisoformat(str(iso_str)[:19])
+            except Exception:
+                return None
+            return (dt - _tdl(minutes=tz_min)).isoformat()
         with connect_db() as c:
             # Ensure 'title' column exists (migration-safe)
             cols = {r[1] for r in c.execute("PRAGMA table_info(live_session)").fetchall()}
@@ -2834,7 +2847,12 @@ class App:
         payload = {
             "session": {
                 "id": s[0], "device_id": s[1], "device_host": s[2], "input_key": s[3], "input_index": s[4],
-                "input_identifier": s[5], "input_display_name": s[6], "started_at": s[7], "ended_at": s[8], "title": s[9]
+                "input_identifier": s[5], "input_display_name": s[6],
+                "started_at": s[7], "ended_at": s[8],
+                "started_at_local": _to_local(s[7]),
+                "ended_at_local": _to_local(s[8]),
+                "tz_offset_minutes": tz_min,
+                "title": s[9]
             },
             "samples": []
         }
@@ -2867,7 +2885,11 @@ class App:
                 "rx_percent_lost": rx_percent_lost,
                 "rx_lost_nb_packets": rx_lost_nb_packets,
             })
-        payload["samples"] = [by_ts[k] for k in sorted(by_ts.keys())]
+        ordered_keys = sorted(by_ts.keys())
+        if tz_min is not None:
+            for k in ordered_keys:
+                by_ts[k]["ts_local"] = _to_local(by_ts[k].get("ts"))
+        payload["samples"] = [by_ts[k] for k in ordered_keys]
         try:
             ts_sc = s[7][:19].replace("T"," ") if s[7] else ""
             ts_ec = s[8][:19].replace("T"," ") if s[8] else ""
@@ -2986,7 +3008,7 @@ class App:
               <td>{esc(idx)}</td>
               <td>{esc(ident)}</td>
               <td>{esc(disp)}</td>
-              <td>{esc(_fmt_ts(start))}</td>
+              <td><div>{esc(_fmt_ts(start))} <span class="text-muted small">UTC</span></div><div class="text-muted small local-ts" data-utc="{esc(start) if start else ''}"></div></td>
               <td>{esc(dur_txt)}</td>
               <td>
                 <form class="d-flex" method="post" action="/log_rename">
@@ -2995,7 +3017,7 @@ class App:
                   <button class="btn btn-sm btn-outline-success" type="submit">Save</button>
                 </form>
               </td>
-              <td>{esc(_fmt_ts(end))}</td>
+              <td><div>{esc(_fmt_ts(end))}{' <span class="text-muted small">UTC</span>' if end else ''}</div><div class="text-muted small local-ts" data-utc="{esc(end) if end else ''}"></div></td>
               <td>
                 <a class="btn btn-sm btn-outline-primary" href="/log_download?session_id={sid}" download="session_{sid}.json">JSON</a>
                 <a class="btn btn-sm btn-outline-secondary ms-1" href="/log_download_csv?session_id={sid}">CSV</a>
@@ -3045,10 +3067,10 @@ class App:
                   <th>Input</th>
                   <th>Identifier</th>
                   <th>Display name</th>
-                  <th>Started</th>
+                  <th>Started <span class="text-muted small fw-normal">(UTC + local)</span></th>
                   <th>Duration</th>
                   <th>Title</th>
-                  <th>Ended</th>
+                  <th>Ended <span class="text-muted small fw-normal">(UTC + local)</span></th>
                   <th>Download</th>
                 </tr>
               </thead>
@@ -3057,6 +3079,39 @@ class App:
               </tbody>
             </table>
           </div>
+          <script>
+          (function(){{
+            function pad(n){{return String(n).padStart(2,'0');}}
+            function fmtLocal(d){{
+              return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+' '+
+                     pad(d.getHours())+':'+pad(d.getMinutes())+':'+pad(d.getSeconds());
+            }}
+            var tzMin = new Date().getTimezoneOffset();
+            var tzLabel = (function(){{
+              var off = -tzMin;
+              var sign = off >= 0 ? '+' : '-';
+              var abs = Math.abs(off);
+              return 'UTC' + sign + pad(Math.floor(abs/60)) + ':' + pad(abs%60);
+            }})();
+            document.querySelectorAll('.local-ts').forEach(function(el){{
+              var iso = el.getAttribute('data-utc');
+              if (!iso) return;
+              var s = iso.length >= 19 ? iso.substring(0,19) : iso;
+              if (s.indexOf('T') < 0) s = s.replace(' ','T');
+              var d = new Date(s + 'Z');
+              if (isNaN(d.getTime())) return;
+              el.textContent = fmtLocal(d) + ' ' + tzLabel;
+            }});
+            // Add tz_offset to download links so server-side exports include local time
+            document.querySelectorAll('a[href^="/log_download"], a[href^="/log_pdf"]').forEach(function(a){{
+              try {{
+                var u = new URL(a.getAttribute('href'), window.location.origin);
+                u.searchParams.set('tz_offset', String(tzMin));
+                a.setAttribute('href', u.pathname + (u.search || ''));
+              }} catch(e) {{}}
+            }});
+          }})();
+          </script>
         </body></html>
         """
         cherrypy.response.headers['Content-Type'] = 'text/html; charset=utf-8'
@@ -3064,8 +3119,9 @@ class App:
 
     @require_login
     @cherrypy.expose
-    def log_download_csv(self, session_id=None):
+    def log_download_csv(self, session_id=None, tz_offset=None):
         import sqlite3, csv, io, json
+        from datetime import datetime as _dtc, timedelta as _tdc
         cherrypy.response.headers["Content-Type"] = "text/csv; charset=utf-8"
         if not session_id:
             return b'error, missing session_id'
@@ -3073,6 +3129,10 @@ class App:
             sid = int(session_id)
         except Exception:
             return b'error, bad session_id'
+        try:
+            tz_min = int(tz_offset) if tz_offset is not None else None
+        except Exception:
+            tz_min = None
         with connect_db() as c:
             # Ensure new columns exist (migration-safe)
             cols = {r[1] for r in c.execute("PRAGMA table_info(live_sample)").fetchall()}
@@ -3086,19 +3146,30 @@ class App:
                        link_name, owdR, rx_bitrate, rx_percent_lost, rx_lost_nb_packets
                 FROM live_sample WHERE session_id=? ORDER BY id ASC
             """, (sid,)).fetchall()
+
+        def _ts_local(iso_str):
+            if not iso_str or tz_min is None:
+                return ''
+            try:
+                dt = _dtc.fromisoformat(str(iso_str)[:19])
+            except Exception:
+                return ''
+            return (dt - _tdc(minutes=tz_min)).isoformat()
+
         output = io.StringIO()
         w = csv.writer(output)
-        w.writerow(["ts","year","month","day","hour","minute","second","latitude","longitude","drops_video","drops_ts","link_name","owdR","rx_bitrate","rx_percent_lost","rx_lost_nb_packets"])
+        w.writerow(["ts_utc","ts_local","year","month","day","hour","minute","second","latitude","longitude","drops_video","drops_ts","link_name","owdR","rx_bitrate","rx_percent_lost","rx_lost_nb_packets"])
         for r in rows:
-            w.writerow(r)
+            w.writerow((r[0], _ts_local(r[0])) + tuple(r[1:]))
         data = output.getvalue()
         cherrypy.response.headers['Content-Disposition'] = f'attachment; filename=session_{sid}.csv'
         return data.encode('utf-8')
 
     @require_login
     @cherrypy.expose
-    def log_download_geojson(self, session_id=None):
+    def log_download_geojson(self, session_id=None, tz_offset=None):
         import sqlite3, json
+        from datetime import datetime as _dtg, timedelta as _tdg
         cherrypy.response.headers["Content-Type"] = "application/geo+json; charset=utf-8"
         if not session_id:
             return b'{"error":"missing session_id"}'
@@ -3106,6 +3177,18 @@ class App:
             sid = int(session_id)
         except Exception:
             return b'{"error":"bad session_id"}'
+        try:
+            tz_min = int(tz_offset) if tz_offset is not None else None
+        except Exception:
+            tz_min = None
+        def _to_local(iso_str):
+            if not iso_str or tz_min is None:
+                return None
+            try:
+                dt = _dtg.fromisoformat(str(iso_str)[:19])
+            except Exception:
+                return None
+            return (dt - _tdg(minutes=tz_min)).isoformat()
 
         with connect_db() as c:
             # Ensure columns exist (migration-safe)
@@ -3183,7 +3266,11 @@ class App:
             return q
 
         # Main path coordinates (LineString): [lng, lat]
-        ordered_ticks = [by_ts[k] for k in sorted(by_ts.keys())]
+        _ordered_keys = sorted(by_ts.keys())
+        if tz_min is not None:
+            for _k in _ordered_keys:
+                by_ts[_k]["ts_local"] = _to_local(by_ts[_k].get("ts"))
+        ordered_ticks = [by_ts[k] for k in _ordered_keys]
         path_coords = []
         for t in ordered_ticks:
             lat, lng = t.get('latitude'), t.get('longitude')
@@ -3207,6 +3294,9 @@ class App:
                     "input_display_name": s[6],
                     "started_at": s[7],
                     "ended_at": s[8],
+                    "started_at_local": _to_local(s[7]),
+                    "ended_at_local": _to_local(s[8]),
+                    "tz_offset_minutes": tz_min,
                     "title": s[9]
                 }
             })
@@ -3224,6 +3314,7 @@ class App:
             props = {
                 "type": "sample",
                 "ts": t.get('ts'),
+                "ts_local": t.get('ts_local'),
                 "year": t.get('year'), "month": t.get('month'), "day": t.get('day'),
                 "hour": t.get('hour'), "minute": t.get('minute'), "second": t.get('second'),
                 "drops_video": t.get('drops_video'),
@@ -3326,13 +3417,43 @@ class App:
             <div class="d-flex align-items-center justify-content-between mb-2">
               <div>
                 <h1 class="h5 m-0">""" + esc_page + """</h1>
-                <div class="text-muted small">Started: """ + esc_start + """ — Ended: """ + (esc_end or 'live') + """</div>
+                <div class="text-muted small">
+                  Started: """ + esc_start + """ <span class="text-muted">UTC</span>
+                  <span class="local-ts" data-utc='""" + esc(s_start or '') + """'></span>
+                  — Ended: """ + (esc_end + ' <span class="text-muted">UTC</span>' if s_end else 'live') + """
+                  <span class="local-ts" data-utc='""" + esc(s_end or '') + """'></span>
+                </div>
               </div>
               <div>
                 <a class="btn btn-outline-secondary me-2" href="/logs_ui">← Sessions</a>
-                <a class="btn btn-outline-primary" href="/log_download?session_id=""" + str(s_id) + """" download="session_""" + str(s_id) + """.json">Download JSON</a>
+                <a id="dlJsonBtn" class="btn btn-outline-primary" href="/log_download?session_id=""" + str(s_id) + """" download="session_""" + str(s_id) + """.json">Download JSON</a>
               </div>
             </div>
+            <script>
+            (function(){
+              function pad(n){return String(n).padStart(2,'0');}
+              var tzMin = new Date().getTimezoneOffset();
+              var off = -tzMin, sign = off>=0?'+':'-', abs = Math.abs(off);
+              var tzLabel = 'UTC' + sign + pad(Math.floor(abs/60)) + ':' + pad(abs%60);
+              document.querySelectorAll('.local-ts').forEach(function(el){
+                var iso = el.getAttribute('data-utc');
+                if(!iso){return;}
+                var s = iso.length>=19 ? iso.substring(0,19) : iso;
+                if(s.indexOf('T')<0){s = s.replace(' ','T');}
+                var d = new Date(s + 'Z');
+                if(isNaN(d.getTime())){return;}
+                el.textContent = ' (local: '+ d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+' '+pad(d.getHours())+':'+pad(d.getMinutes())+':'+pad(d.getSeconds())+' '+tzLabel+')';
+              });
+              var dl = document.getElementById('dlJsonBtn');
+              if(dl){
+                try{
+                  var u = new URL(dl.getAttribute('href'), window.location.origin);
+                  u.searchParams.set('tz_offset', String(tzMin));
+                  dl.setAttribute('href', u.pathname + (u.search||''));
+                }catch(e){}
+              }
+            })();
+            </script>
 
 <div id="map" class="mb-3 border rounded"></div>
 
@@ -4105,15 +4226,19 @@ async function repoll(){
 
     @require_login
     @cherrypy.expose
-    def log_pdf(self, session_id=None):
+    def log_pdf(self, session_id=None, tz_offset=None):
         import io
-        from datetime import datetime
+        from datetime import datetime, timedelta
         if not session_id:
             raise cherrypy.HTTPRedirect("/logs_ui?msg=Missing%20session_id")
         try:
             sid = int(session_id)
         except Exception:
             raise cherrypy.HTTPRedirect("/logs_ui?msg=Bad%20session_id")
+        try:
+            tz_min = int(tz_offset) if tz_offset is not None else None
+        except Exception:
+            tz_min = None
 
         try:
             from reportlab.lib.pagesizes import A4
@@ -4250,13 +4375,43 @@ async function repoll(){
         story.append(Paragraph(f"Generated {generated}", sSmall))
         story.append(HRFlowable(width="100%", thickness=1, color=COL_HDR, spaceAfter=6))
 
+        # Local time helper (browser tz offset, in minutes, like JS getTimezoneOffset())
+        def _to_local_str(iso_str):
+            if not iso_str or tz_min is None:
+                return None
+            dt = _parse_dt(iso_str)
+            if not dt:
+                return None
+            local_dt = dt - timedelta(minutes=tz_min)
+            return local_dt.strftime('%Y-%m-%d %H:%M:%S')
+
+        def _tz_label():
+            if tz_min is None:
+                return ''
+            off = -tz_min
+            sign = '+' if off >= 0 else '-'
+            a = abs(off)
+            return f"UTC{sign}{a//60:02d}:{a%60:02d}"
+
+        tz_lbl = _tz_label()
+        started_utc = (s[7][:19].replace('T', ' ') if s[7] else '—')
+        ended_utc   = (s[8][:19].replace('T', ' ') if s[8] else '—')
+        started_local = _to_local_str(s[7])
+        ended_local   = _to_local_str(s[8])
+
         # Session info table
         info_data = [
             ["Session", f"#{sid}  {title_str}"],
             ["StreamHub", f"{sh_name}  ({s[2]})"],
             ["Input", f"#{s[4]}  {s[5] or '—'}  {s[6] or ''}".strip()],
-            ["Started", s[7][:19].replace('T', ' ') if s[7] else '—'],
-            ["Ended",   s[8][:19].replace('T', ' ') if s[8] else '—'],
+            ["Started (UTC)", started_utc],
+        ]
+        if started_local:
+            info_data.append([f"Started ({tz_lbl})", started_local])
+        info_data.append(["Ended (UTC)", ended_utc])
+        if ended_local:
+            info_data.append([f"Ended ({tz_lbl})", ended_local])
+        info_data += [
             ["Duration", duration],
             ["Dropped video / TS", f"{drops_video_max} / {drops_ts_max}"],
         ]
