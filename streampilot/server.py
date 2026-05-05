@@ -3383,13 +3383,13 @@ class App:
 
         import json as _json
         _t_end_js = ("new Date(" + _json.dumps(str(s_end)) + ").getTime()") if s_end else "Date.now()"
-        _events_js_tpl = '(function(){\nvar SESSION_ID=__SID__;\nvar T_START=new Date(__TSTART__).getTime();\nvar T_END=__TEND__;\nvar NL=String.fromCharCode(10);\nvar LEVEL_COLOR={ERROR:"#dc3545",WARNING:"#fd7e14",WARN:"#fd7e14",INFO:"#0d6efd",DEBUG:"#6c757d"};\nvar LEVEL_BADGE={ERROR:"<span class=\'badge\' style=\'background:#dc3545\'>ERROR</span>",WARNING:"<span class=\'badge\' style=\'background:#fd7e14\'>WARN</span>",INFO:"<span class=\'badge\' style=\'background:#0d6efd\'>INFO</span>",DEBUG:"<span class=\'badge\' style=\'background:#6c757d\'>DEBUG</span>"};\nvar tip=document.createElement("div");\ntip.style.cssText="position:fixed;background:#212529;color:#fff;padding:5px 10px;border-radius:5px;font-size:11px;pointer-events:none;display:none;max-width:480px;z-index:9999;white-space:pre-wrap;";\ndocument.body.appendChild(tip);\nfunction renderEvents(evs){\nvar el=document.getElementById("eventsTimeline");\nvar listWrap=document.getElementById("eventsListWrap");\nvar tbody=document.getElementById("eventsList");\nif(!evs||!evs.length){el.innerHTML="<span class=\'text-muted small\'>Aucun event trouv\\u00e9 pour cette session.</span>";listWrap.style.display="none";return;}\nvar W=1000,H=44,cy=H/2,tEnd=T_END;if(tEnd<=T_START)tEnd=T_START+1;\nvar dur=tEnd-T_START||1;\nvar svg=\'<svg width="100%" height="\'+H+\'" viewBox="0 0 \'+W+\' \'+H+\'" xmlns="http://www.w3.org/2000/svg" style="display:block">\';\nsvg+=\'<rect x="0" y="\'+(cy-2)+\'" width="\'+W+\'" height="4" fill="#dee2e6" rx="2"/>\';\nevs.forEach(function(ev,i){\nvar t=new Date(ev.ts).getTime();\nvar x=Math.max(6,Math.min(W-6,Math.round((t-T_START)/dur*W)));\nvar col=LEVEL_COLOR[ev.level]||"#0d6efd";\nvar msg=(ev.message||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/"/g,"&quot;");\nsvg+=\'<line x1="\'+x+\'" y1="4" x2="\'+x+\'" y2="\'+(H-4)+\'" stroke="\'+col+\'" stroke-width="1.5" opacity="0.4"/>\';\nsvg+=\'<circle cx="\'+x+\'" cy="\'+cy+\'" r="5" fill="\'+col+\'" data-idx="\'+i+\'" data-ts="\'+ev.ts+\'" data-lvl="\'+(ev.level||"")+\'" data-msg="\'+msg+\'" style="cursor:pointer"/>\';\n});\nsvg+=\'</svg>\';el.innerHTML=svg;\nvar rows="";\nevs.forEach(function(ev,i){\nvar badge=LEVEL_BADGE[ev.level]||LEVEL_BADGE["INFO"];\nvar msg=(ev.message||"").replace(/&/g,"&amp;").replace(/</g,"&lt;");\nrows+=\'<tr data-idx="\'+i+\'" style="cursor:pointer"><td class="text-muted">\'+ev.ts+\'</td><td>\'+badge+\'</td><td>\'+msg+\'</td></tr>\';\n});\ntbody.innerHTML=rows;listWrap.style.display="block";\nfunction highlightDot(idx,on){var c=el.querySelector(\'circle[data-idx="\'+idx+\'"]\');if(!c)return;c.setAttribute("r",on?"9":"5");c.setAttribute("stroke",on?"#fff":"none");c.setAttribute("stroke-width",on?"2":"0");}\nfunction highlightRow(idx,on){var tr=tbody.querySelector(\'tr[data-idx="\'+idx+\'"]\');if(!tr)return;tr.style.background=on?"#e8f4fd":"";if(on)tr.scrollIntoView({block:"nearest",behavior:"smooth"});}\ntbody.querySelectorAll("tr").forEach(function(tr){var idx=tr.dataset.idx;tr.addEventListener("mouseenter",function(){highlightDot(idx,true);});tr.addEventListener("mouseleave",function(){highlightDot(idx,false);});});\nel.querySelectorAll("circle").forEach(function(c){\nc.addEventListener("mouseenter",function(){highlightDot(c.dataset.idx,true);highlightRow(c.dataset.idx,true);tip.textContent=c.dataset.ts+"  ["+c.dataset.lvl+"]"+NL+c.dataset.msg;tip.style.display="block";});\nc.addEventListener("mousemove",function(e){tip.style.left=(e.clientX+14)+"px";tip.style.top=(e.clientY-10)+"px";});\nc.addEventListener("mouseleave",function(){highlightDot(c.dataset.idx,false);highlightRow(c.dataset.idx,false);tip.style.display="none";});\n});}\nfunction fetchEvents(){fetch("/session_events?session_id="+SESSION_ID).then(function(r){return r.json();}).then(function(data){renderEvents(data.ok?data.events:[]);}).catch(function(){document.getElementById("eventsTimeline").innerHTML="<span class=\'text-muted small\'>Erreur chargement events.</span>";});}\nwindow.refreshEvents=fetchEvents;fetchEvents();\n})();'
+        _events_js_tpl = '(function(){\nvar SESSION_ID=__SID__;\nvar T_START=new Date(__TSTART__).getTime();\nvar T_END=__TEND__;\nvar NL=String.fromCharCode(10);\nvar LEVEL_COLOR={ERROR:"#dc3545",WARNING:"#fd7e14",WARN:"#fd7e14",INFO:"#0d6efd",DEBUG:"#6c757d"};\nvar LEVEL_BADGE={ERROR:"<span class=\'badge\' style=\'background:#dc3545\'>ERROR</span>",WARNING:"<span class=\'badge\' style=\'background:#fd7e14\'>WARN</span>",INFO:"<span class=\'badge\' style=\'background:#0d6efd\'>INFO</span>",DEBUG:"<span class=\'badge\' style=\'background:#6c757d\'>DEBUG</span>"};\nfunction _pad2(n){return String(n).padStart(2,"0");}\nfunction fmtEvUTC(ts){return ts?String(ts).replace("T"," ").substring(0,19):"";}\nfunction fmtEvLocal(ts){if(!ts)return "";var s=String(ts);if(s.length>=19)s=s.substring(0,19);if(s.indexOf("T")<0)s=s.replace(" ","T");var d=new Date(s+"Z");if(isNaN(d.getTime()))return "";var off=-d.getTimezoneOffset(),sign=off>=0?"+":"-",ab=Math.abs(off);var lbl="UTC"+sign+_pad2(Math.floor(ab/60))+":"+_pad2(ab%60);return d.getFullYear()+"-"+_pad2(d.getMonth()+1)+"-"+_pad2(d.getDate())+" "+_pad2(d.getHours())+":"+_pad2(d.getMinutes())+":"+_pad2(d.getSeconds())+" "+lbl;}\nfunction fmtEvTsHTML(ts){var u=fmtEvUTC(ts),l=fmtEvLocal(ts);return l?(u+" UTC<br><span class=\'text-muted\'>"+l+"</span>"):(u+" UTC");}\nfunction fmtEvTsTip(ts){var u=fmtEvUTC(ts),l=fmtEvLocal(ts);return l?(u+" UTC"+NL+l):(u+" UTC");}\nvar tip=document.createElement("div");\ntip.style.cssText="position:fixed;background:#212529;color:#fff;padding:5px 10px;border-radius:5px;font-size:11px;pointer-events:none;display:none;max-width:480px;z-index:9999;white-space:pre-wrap;";\ndocument.body.appendChild(tip);\nfunction renderEvents(evs){\nvar el=document.getElementById("eventsTimeline");\nvar listWrap=document.getElementById("eventsListWrap");\nvar tbody=document.getElementById("eventsList");\nif(!evs||!evs.length){el.innerHTML="<span class=\'text-muted small\'>Aucun event trouv\\u00e9 pour cette session.</span>";listWrap.style.display="none";return;}\nvar W=1000,H=44,cy=H/2,tEnd=T_END;if(tEnd<=T_START)tEnd=T_START+1;\nvar dur=tEnd-T_START||1;\nvar svg=\'<svg width="100%" height="\'+H+\'" viewBox="0 0 \'+W+\' \'+H+\'" xmlns="http://www.w3.org/2000/svg" style="display:block">\';\nsvg+=\'<rect x="0" y="\'+(cy-2)+\'" width="\'+W+\'" height="4" fill="#dee2e6" rx="2"/>\';\nevs.forEach(function(ev,i){\nvar t=new Date(ev.ts).getTime();\nvar x=Math.max(6,Math.min(W-6,Math.round((t-T_START)/dur*W)));\nvar col=LEVEL_COLOR[ev.level]||"#0d6efd";\nvar msg=(ev.message||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/"/g,"&quot;");\nsvg+=\'<line x1="\'+x+\'" y1="4" x2="\'+x+\'" y2="\'+(H-4)+\'" stroke="\'+col+\'" stroke-width="1.5" opacity="0.4"/>\';\nsvg+=\'<circle cx="\'+x+\'" cy="\'+cy+\'" r="5" fill="\'+col+\'" data-idx="\'+i+\'" data-ts="\'+ev.ts+\'" data-lvl="\'+(ev.level||"")+\'" data-msg="\'+msg+\'" style="cursor:pointer"/>\';\n});\nsvg+=\'</svg>\';el.innerHTML=svg;\nvar rows="";\nevs.forEach(function(ev,i){\nvar badge=LEVEL_BADGE[ev.level]||LEVEL_BADGE["INFO"];\nvar msg=(ev.message||"").replace(/&/g,"&amp;").replace(/</g,"&lt;");\nrows+=\'<tr data-idx="\'+i+\'" style="cursor:pointer"><td class="text-muted">\'+fmtEvTsHTML(ev.ts)+\'</td><td>\'+badge+\'</td><td>\'+msg+\'</td></tr>\';\n});\ntbody.innerHTML=rows;listWrap.style.display="block";\nfunction highlightDot(idx,on){var c=el.querySelector(\'circle[data-idx="\'+idx+\'"]\');if(!c)return;c.setAttribute("r",on?"9":"5");c.setAttribute("stroke",on?"#fff":"none");c.setAttribute("stroke-width",on?"2":"0");}\nfunction highlightRow(idx,on){var tr=tbody.querySelector(\'tr[data-idx="\'+idx+\'"]\');if(!tr)return;tr.style.background=on?"#e8f4fd":"";if(on)tr.scrollIntoView({block:"nearest",behavior:"smooth"});}\ntbody.querySelectorAll("tr").forEach(function(tr){var idx=tr.dataset.idx;tr.addEventListener("mouseenter",function(){highlightDot(idx,true);});tr.addEventListener("mouseleave",function(){highlightDot(idx,false);});});\nel.querySelectorAll("circle").forEach(function(c){\nc.addEventListener("mouseenter",function(){highlightDot(c.dataset.idx,true);highlightRow(c.dataset.idx,true);tip.textContent=fmtEvTsTip(c.dataset.ts)+"  ["+c.dataset.lvl+"]"+NL+c.dataset.msg;tip.style.display="block";});\nc.addEventListener("mousemove",function(e){tip.style.left=(e.clientX+14)+"px";tip.style.top=(e.clientY-10)+"px";});\nc.addEventListener("mouseleave",function(){highlightDot(c.dataset.idx,false);highlightRow(c.dataset.idx,false);tip.style.display="none";});\n});}\nfunction fetchEvents(){fetch("/session_events?session_id="+SESSION_ID).then(function(r){return r.json();}).then(function(data){renderEvents(data.ok?data.events:[]);}).catch(function(){document.getElementById("eventsTimeline").innerHTML="<span class=\'text-muted small\'>Erreur chargement events.</span>";});}\nwindow.refreshEvents=fetchEvents;fetchEvents();\n})();'
         _events_js = (_events_js_tpl
             .replace('__SID__', str(s_id))
             .replace('__TSTART__', _json.dumps(str(s_start or '')))
             .replace('__TEND__', _t_end_js)
         )
-        _events_html_tpl = '<div class="mt-4"><div class="fw-semibold small mb-1">Events <span class="text-muted fw-normal">(logs StreamHub)</span></div><div id="eventsTimeline" style="min-height:44px;border:1px solid #dee2e6;border-radius:4px;padding:4px 8px;"><span class="text-muted small">Chargement…</span></div><div id="eventsListWrap" class="mt-2" style="display:none;"><table class="table table-sm table-hover mb-0" style="font-size:0.78rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;border:1px solid #dee2e6;border-radius:4px;"><thead class="table-light"><tr><th style="width:160px">Timestamp</th><th style="width:70px">Level</th><th>Message</th></tr></thead><tbody id="eventsList"></tbody></table></div></div>'
+        _events_html_tpl = '<div class="mt-4"><div class="fw-semibold small mb-1">Events <span class="text-muted fw-normal">(logs StreamHub)</span></div><div id="eventsTimeline" style="min-height:44px;border:1px solid #dee2e6;border-radius:4px;padding:4px 8px;"><span class="text-muted small">Chargement…</span></div><div id="eventsListWrap" class="mt-2" style="display:none;"><table class="table table-sm table-hover mb-0" style="font-size:0.78rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;border:1px solid #dee2e6;border-radius:4px;"><thead class="table-light"><tr><th style="width:230px">Timestamp <span class="text-muted fw-normal">(UTC + local)</span></th><th style="width:70px">Level</th><th>Message</th></tr></thead><tbody id="eventsList"></tbody></table></div></div>'
         _events_timeline_html = _events_html_tpl + '<script>' + _events_js + '</script>'
 
         esc_page = esc(page_title)
@@ -4037,12 +4037,29 @@ async function repoll(){
               const tsEnd = document.getElementById('tsEnd');
               const linkBadges = document.getElementById('linkBadges');
               scrub.max = Math.max(0, samples.length - 1);
-              function fmtTs(ts){ return ts?ts.replace('T',' ').substring(0,19):ts; }
-              tsStart.textContent = fmtTs(samples[0].ts);
-              tsEnd.textContent = fmtTs(samples[samples.length-1].ts);
+              function _pad2(n){return String(n).padStart(2,'0');}
+              function _tzLabel(d){
+                var tz = d.getTimezoneOffset(), off = -tz;
+                var sign = off>=0?'+':'-', abs = Math.abs(off);
+                return 'UTC'+sign+_pad2(Math.floor(abs/60))+':'+_pad2(abs%60);
+              }
+              function fmtTs(ts){
+                if(!ts) return '';
+                var utc = ts.replace('T',' ').substring(0,19);
+                var sIso = ts.length>=19 ? ts.substring(0,19) : ts;
+                if(sIso.indexOf('T')<0) sIso = sIso.replace(' ','T');
+                var d = new Date(sIso+'Z');
+                if(isNaN(d.getTime())) return utc+' UTC';
+                var local = d.getFullYear()+'-'+_pad2(d.getMonth()+1)+'-'+_pad2(d.getDate())+' '+
+                            _pad2(d.getHours())+':'+_pad2(d.getMinutes())+':'+_pad2(d.getSeconds());
+                return '<div>'+utc+' <span class="text-muted">UTC</span></div>'+
+                       '<div class="text-muted">'+local+' '+_tzLabel(d)+'</div>';
+              }
+              tsStart.innerHTML = fmtTs(samples[0].ts);
+              tsEnd.innerHTML = fmtTs(samples[samples.length-1].ts);
               function renderAt(i) {
                 const s = samples[i];
-                tsNow.textContent = fmtTs(s.ts);
+                tsNow.innerHTML = fmtTs(s.ts);
                 // Move the cursor point to the current GPS position (always reflect latest lat/lng; no warnings)
                 var llc = (s && s.latitude!=null && s.longitude!=null) ? L.latLng(s.latitude, s.longitude) : null;
                 if (llc) {
@@ -4463,7 +4480,8 @@ async function repoll(){
 
         # Bitrate chart (SVG polyline via reportlab Drawing)
         if len(bitrate_series) >= 2:
-            story.append(Paragraph("Total bitrate over time (kb/s)", sH2))
+            _chart_tz_suffix = f" — times in UTC (browser: {tz_lbl})" if tz_min is not None else " — times in UTC"
+            story.append(Paragraph("Total bitrate over time (kb/s)" + _chart_tz_suffix, sH2))
             CH_W, CH_H = float(W_doc), 60.0
             pad_l, pad_r, pad_t, pad_b = 10.0, 6.0, 6.0, 14.0
             draw_w = CH_W - pad_l - pad_r
@@ -4491,22 +4509,45 @@ async function repoll(){
                 y = pad_b + (v / max_v) * draw_h
                 pts += [x, y]
             d.add(PolyLine(pts, strokeColor=colors.HexColor('#0d6efd'), strokeWidth=1.2, fillColor=None))
-            # x-axis labels (start / mid / end)
-            for frac, label in ((0.0, bitrate_series[0][0][11:19]),
-                                (0.5, bitrate_series[n//2][0][11:19]),
-                                (1.0, bitrate_series[-1][0][11:19])):
+            # x-axis labels (start / mid / end) — UTC time slices
+            for frac, label in ((0.0, bitrate_series[0][0][11:19] + ' UTC'),
+                                (0.5, bitrate_series[n//2][0][11:19] + ' UTC'),
+                                (1.0, bitrate_series[-1][0][11:19] + ' UTC')):
                 x = pad_l + frac * draw_w
                 d.add(String(x, 2, label, fontSize=5, fillColor=colors.grey, textAnchor='middle'))
             story.append(d)
+            # Local-time caption below the chart
+            if tz_min is not None:
+                def _hms_local(iso_str):
+                    loc = _to_local_str(iso_str)
+                    return loc[11:19] if loc else '?'
+                _mid_iso = bitrate_series[n//2][0]
+                _cap = (f"Local ({tz_lbl}): "
+                        f"{_hms_local(bitrate_series[0][0])} — "
+                        f"{_hms_local(_mid_iso)} — "
+                        f"{_hms_local(bitrate_series[-1][0])}")
+                story.append(Paragraph(f"<font size='7' color='#6c757d'>{_cap}</font>", sN))
             story.append(Spacer(1, 6))
 
         # StreamHub events
         if ev_rows:
             story.append(Paragraph("StreamHub events", sH2))
-            ev_data = [["Timestamp", "Level", "Message"]]
+            ts_header = "Timestamp (UTC + local)" if tz_min is not None else "Timestamp (UTC)"
+            ev_data = [[ts_header, "Level", "Message"]]
+            sEvTs = ParagraphStyle('evTs', parent=sN, fontName='Courier',
+                                    fontSize=7, leading=8)
             for ev in ev_rows:
-                ev_data.append([ev[0], ev[1] or '', ev[2] or ''])
-            ev_cw = [40*mm, 18*mm, W_doc - 58*mm]
+                ts_utc = ev[0] or ''
+                ts_loc = _to_local_str(ts_utc) if tz_min is not None else None
+                if ts_loc:
+                    ts_html = (f"{ts_utc} <font size='6' color='#6c757d'>UTC</font>"
+                               f"<br/><font size='6' color='#6c757d'>{ts_loc} {tz_lbl}</font>")
+                else:
+                    ts_html = f"{ts_utc} <font size='6' color='#6c757d'>UTC</font>"
+                ts_cell = Paragraph(ts_html, sEvTs)
+                ev_data.append([ts_cell, ev[1] or '', ev[2] or ''])
+            ts_col_w = 55*mm if tz_min is not None else 40*mm
+            ev_cw = [ts_col_w, 18*mm, W_doc - (ts_col_w + 18*mm)]
             ev_t = Table(ev_data, colWidths=ev_cw, repeatRows=1)
             lv_colors = {
                 'ERROR':   colors.HexColor('#f8d7da'),
