@@ -10,7 +10,7 @@
   </a>
 </p>
 
-**StreamPilot** is a web app for real‑time supervision and geo‑visualization (location) of **Haivision StreamHub** and connected **mobile video transmitters**. Stats from 4G/5G modems, ETH1‑2, Wi‑Fi and USB are recorded and displayed live during each session through several charts. You can use it during live production or site surveys to map precise coverage for public/private 4G/5G or any network interface (ETH1‑2, STARLINK, Wi‑Fi, USB) supported by the transmitter. It also supports the ** Haivision SRT Gateway** supervision with real-time stats, map, notifications and reports.
+**StreamPilot** is a web app for real‑time supervision and geo‑visualization (location) of **Haivision StreamHub** and connected **mobile video transmitters**. Stats from 4G/5G modems, ETH1‑2, Wi‑Fi and USB are recorded and displayed live during each session through several charts. You can use it during live production or site surveys to map precise coverage for public/private 4G/5G or any network interface (ETH1‑2, STARLINK, Wi‑Fi, USB) supported by the transmitter. It also supports the **Haivision SRT Gateway** supervision with real-time stats, map, notifications and reports.
 Ideal for mobile broadcast: cycle tours, marathons, triathlons, remote production, and private 5G deployments.
 
 Raw data is provided by **Haivision StreamHub** via its REST API (HTTP/HTTPS). All network interfaces and GPS are monitored.
