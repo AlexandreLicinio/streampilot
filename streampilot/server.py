@@ -5629,8 +5629,39 @@ async function repoll(){
             c.execute("UPDATE srt_gw_slack SET notify_paused=0 WHERE gw_id=?", (gid,))
         raise cherrypy.HTTPRedirect("/settings?msg=SRT+Gateway+notifications+resumed")
 
+def _parse_cli():
+    # Parse CLI args and push them into env vars before anything reads them
+    import argparse
 
+    parser = argparse.ArgumentParser(
+        add_help=False,
+        allow_abbrev=False
+    )
+    
+    parser.add_argument('-port')
+    parser.add_argument('-name')
+    parser.add_argument('-user')
+    parser.add_argument('-password')
+    parser.add_argument('-max_streamhub')
+    parser.add_argument('-max_srtgateway')
+    args = parser.parse_args()
+    return args
+
+def _apply_cli_env(args):
+    # Runtime flags (always allowed)
+    if args.port:
+        os.environ['SP_PORT'] = args.port
+    if args.name:
+        os.environ['CLIENT_NAME'] = args.name
+    if args.max_streamhub:
+        os.environ['MAX_STREAMHUB'] = args.max_streamhub
+    if args.max_srtgateway:
+        os.environ['MAX_SRTGATEWAY'] = args.max_srtgateway
+    
 def run():
+    args = _parse_cli()
+    _apply_cli_env(args)
+    
     _init_db()  # create tables/indexes once at startup
     # Attach CORS headers to every response (including 3xx redirects)
     def _cors():
