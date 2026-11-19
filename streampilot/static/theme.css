@@ -1,0 +1,25 @@
+[data-bs-theme="dark"] {
+    --bs-body-bg: #121212;
+    --bs-body-bg-rgb: 18, 18, 18;
+}
+
+[data-bs-theme="dark"] .navbar {
+    --bs-tertiary-bg-rgb: 27, 27, 27;
+}
+
+[data-bs-theme="dark"] .card {
+    --bs-card-bg: #1e1e1e;
+    --bs-card-border-color: #333;
+    --bs-card-cap-bg: #222;
+}
+
+[data-bs-theme="dark"] .table-light {
+    --bs-table-color: var(--bs-body-color);
+    --bs-table-bg: var(--bs-tertiary-bg);
+    --bs-table-border-color: var(--bs-border-color);
+}
+
+[data-bs-theme="dark"] .btn-outline-dark {
+    --bs-btn-color: var(--bs-body-color);
+    --bs-btn-border-color: var(--bs-secondary-color);
+}
